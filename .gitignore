@@ -1,4 +1,6 @@
-benchmark/.*.
+benchmark/.*
+benchmark/client
+benchmark/node
 benchmark/logs/*
 benchmark/results/*
 benchmark/aws/__pycache__/*

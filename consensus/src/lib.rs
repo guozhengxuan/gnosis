@@ -9,6 +9,7 @@ mod leader;
 mod mempool;
 mod messages;
 mod synchronizer;
+mod timer;
 
 #[cfg(test)]
 #[path = "tests/common.rs"]
