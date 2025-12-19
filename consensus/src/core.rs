@@ -191,6 +191,7 @@ impl Core {
         self.height = 1;
         self.epoch = epoch;
         self.high_qc = QC::genesis();
+        self.timer = Timer::new();
         self.last_voted_height = 0;
         self.last_committed_height = 0;
         self.smvba_y_flag.clear();
@@ -444,7 +445,7 @@ impl Core {
             return Err(ConsensusError::EpochEnd(self.epoch));
         }
         
-        // Ensure the block proposer is a leader for current round.
+        // Ensure the block proposer is one of the leaders.
         let digest = block.digest();
         ensure!(
             self.leader_elector.index_as_leader(block.author, block.height).is_some(),
