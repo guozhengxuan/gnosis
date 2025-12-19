@@ -12,10 +12,10 @@ from aws.remote import Bench, BenchError
 def local(ctx):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'nodes': 4,
+        'nodes': 7,
         'rate': 10_000,
         'tx_size': 512,
-        'faults': 0,
+        'faults': 2,
         'duration': 10,
     }
     node_params = {
@@ -31,7 +31,7 @@ def local(ctx):
             'random_ddos_chance': 0,
             'fallback_length': 1,
             'exp': 0, # verification switch
-            'leader_window': 2
+            'leader_window': 3
         },
         'mempool': {
             'queue_capacity': 100_000,

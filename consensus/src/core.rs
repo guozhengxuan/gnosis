@@ -340,7 +340,6 @@ impl Core {
         block
     }
 
-    #[async_recursion]
     async fn commit(&mut self, block: &Block) -> ConsensusResult<()> {
         let mut current_block = block.clone();
         while current_block.height > self.last_committed_height {
@@ -460,8 +459,8 @@ impl Core {
         block.verify(&self.committee)?;
 
         // 2. 终止 height-2 的 SMVBA
-        if self.pes_path && self.height > 2 {
-            self.terminate_smvba(self.height - 2)?;
+        if self.pes_path && block.height > 2 {
+            self.terminate_smvba(block.height - 2)?;
         }
 
         // Process the QC. This may allow us to advance round.
@@ -492,7 +491,6 @@ impl Core {
         // If we don't, the synchronizer asks for them to other nodes. It will
         // then ensure we process both ancestors in the correct order, and
         // finally make us resume processing this block.
-
         let (b0, b1) = match self.synchronizer.get_ancestors(block).await? {
             Some(ancestors) => ancestors,
             None => {
@@ -512,7 +510,7 @@ impl Core {
         //TODO:
         // 1. 对 height -1 的 block 发送 prepare-opt
         if self.pes_path && block.height > 1 {
-            self.active_prepare_pahse(
+            self.active_prepare_phase(
                 block.height - 1,
                 block.qc.clone(), //qc h-1
                 OPT,
@@ -559,10 +557,10 @@ impl Core {
             debug!("Created hs {:?}", vote);
             let message = ConsensusMessage::HSVote(vote.clone());
             if self.is_optmistic() {
-                if self.leader_elector.index_as_leader(self.name, self.height + 1).is_none() {
-                    // Send vote to all leaders of the next height.
-                    let leaders = self.leader_elector.get_leaders(self.height + 1);
-                    for leader in leaders.iter() {
+                // Send vote to all leaders of the next height.
+                let leaders = self.leader_elector.get_leaders(self.height + 1);
+                for leader in leaders.iter() {
+                    if self.name != *leader {
                         Synchronizer::transmit(
                             message.clone(),
                             &self.name,
@@ -572,7 +570,9 @@ impl Core {
                             OPT,
                         ).await?;
                     }
-                } else {
+                }
+                // If the node is one of the leaders of next height, handle its own vote.
+                if self.leader_elector.index_as_leader(self.name, self.height + 1).is_some() {
                     self.handle_opt_vote(&vote).await?;
                 }
             } else {
@@ -718,7 +718,7 @@ impl Core {
                     self.broadcast_fallback_propose(block).await?;
                 } else if qc.round == self.fallback_length {
                     //启动prepare
-                    self.active_prepare_pahse(qc.height, qc, PES).await?;
+                    self.active_prepare_phase(qc.height, qc, PES).await?;
                 }
             }
         }
@@ -789,7 +789,7 @@ impl Core {
 
     /*************************Prepare**************************/
 
-    async fn active_prepare_pahse(
+    async fn active_prepare_phase(
         &mut self,
         height: SeqNumber,
         qc: QC,
@@ -863,10 +863,11 @@ impl Core {
                         prepare.qc.clone(),
                         OPT,
                         self.signature_service.clone(),
-                    )
-                    .await;
+                    ).await;
+
                     self.prepare_tag.insert(prepare.height, temp.clone());
                     opt_set.insert(temp.author, temp.signature.clone());
+
                     let message = ConsensusMessage::ParPrePare(temp);
                     Synchronizer::transmit(
                         message,
@@ -879,15 +880,39 @@ impl Core {
                     .await?;
                 }
 
-                if (opt_set.len() as u32) == self.committee.random_coin_threshold() {
-                    //启动smvba
-                    let signatures = opt_set
-                        .into_iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
+                match opt_set.len() as u32 {
+                    len if len == self.committee.random_coin_threshold() => {
+                        //启动smvba
+                        let signatures = opt_set
+                            .into_iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
 
-                    self.invoke_smvba(prepare.height, OPT, signatures, Some(prepare.qc.clone()))
-                        .await?;
+                        self.invoke_smvba(prepare.height, OPT, signatures, Some(prepare.qc.clone()))
+                            .await?;
+                    }
+                    len if len == self.committee.quorum_threshold() => {
+                        // Fast commit path.
+                        if let Some(bytes) = self.store.read(prepare.qc.hash.to_vec()).await? {
+                            let block: Block = bincode::deserialize(&bytes)?;
+                            if block.height > self.last_committed_height {
+                                self.commit(&block).await?;
+
+                                self.last_committed_height = block.height;
+
+                                debug!("Committed from fast path {:?}", block);
+
+                                if let Err(e) = self.commit_channel.send(block).await {
+                                    warn!("Failed to send block through the commit channel: {}", e);
+                                }
+                            }
+                        }
+                        // Terminate the last sMVBA instance.
+                        if self.pes_path && prepare.height >= 2 {
+                            self.terminate_smvba(prepare.height - 1)?;
+                        }
+                    }
+                    _ => {}
                 }
             }
             PES => {
@@ -915,7 +940,7 @@ impl Core {
             _ => return Err(ConsensusError::InvalidPrePareTag(prepare.val)),
         }
 
-        return Ok(());
+        Ok(())
     }
 
     /*************************Prepare**************************/
