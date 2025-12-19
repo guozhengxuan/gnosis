@@ -186,7 +186,7 @@ impl Core {
     //initlization epoch
     fn epoch_init(&mut self, epoch: u64) {
         //清除之前的消息
-        self.leader_elector = LeaderElector::new(&self.committee, self.parameters.window);
+        self.leader_elector = LeaderElector::new(&self.committee, self.parameters.leader_window);
         self.aggregator = Aggregator::new(self.committee.clone());
         self.height = 1;
         self.epoch = epoch;
@@ -520,7 +520,7 @@ impl Core {
         }
         //2. 在完全乐观情况下 延迟启动
         if self.is_optmistic() && self.pes_path {
-            self.invoke_fallback(block.height, Some(block.qc.clone()))
+            self.fallback_propose(block.height, Some(block.qc.clone()))
                 .await?;
         }
 
@@ -640,7 +640,7 @@ impl Core {
 
             // ???
             if self.pes_path && !self.is_optmistic() {
-                self.invoke_fallback(self.height, Some(self.high_qc.clone()))
+                self.fallback_propose(self.height, Some(self.high_qc.clone()))
                     .await?;
             }
         }
@@ -661,7 +661,7 @@ impl Core {
         true
     }
 
-    async fn invoke_fallback(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
+    async fn fallback_propose(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
         let block = self.generate_proposal(height, 1, qc, PES).await;
         self.broadcast_fallback_propose(block).await?;
         Ok(())
@@ -1698,7 +1698,7 @@ impl Core {
 
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
-        if let Some(idx) = self.leader_elector.index_as_leader(self.name, self.height) {
+        if self.opt_path && let Some(idx) = self.leader_elector.index_as_leader(self.name, self.height) {
             self.timer.reset(Some(idx as u64 * self.parameters.timeout_delay));
         }
 
@@ -1706,7 +1706,7 @@ impl Core {
             // self.invoke_smvba(self.height, OPT, Vec::new(), None)
             //     .await
             //     .expect("Failed to send the first PES block");
-            self.invoke_fallback(self.height, Some(self.high_qc.clone()))
+            self.fallback_propose(self.height, Some(self.high_qc.clone()))
                 .await
                 .expect("Failed to send the first PES block");
         }

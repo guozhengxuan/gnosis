@@ -16,7 +16,7 @@ def local(ctx):
         'rate': 10_000,
         'tx_size': 512,
         'faults': 0,
-        'duration': 30,
+        'duration': 10,
     }
     node_params = {
         'consensus': {
@@ -29,8 +29,9 @@ def local(ctx):
             'ddos': False, # True for DDoS attack on the leader, False otherwise
             'random_ddos': False,
             'random_ddos_chance': 10,
-            'fallback_length': 2,
-            'exp': 1 # multiplicative factor for exponential fallback
+            'fallback_length': 1,
+            'exp': 0, # verification switch
+            'leader_window': 2
         },
         'mempool': {
             'queue_capacity': 100_000,
@@ -38,7 +39,7 @@ def local(ctx):
             'max_payload_size': 500_000,
             'min_block_delay': 0
         },
-        'protocol': 1, # 0 for 2-chain HotStuff, 1 for ParBFT, 2 for SMVBA
+        'protocol': 2, # 0 for 2-chain HotStuff, 1 for ParBFT, 2 for SMVBA
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug=False).result()

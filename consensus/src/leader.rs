@@ -14,12 +14,12 @@ pub type LeaderElector = RandomLeaderElector;
 pub struct RandomLeaderElector {
     names: Vec<PublicKey>,
     name_to_idx: HashMap<PublicKey, usize>,
-    window: usize,
+    leader_window: usize,
     random_coins: HashMap<(SeqNumber, SeqNumber), RandomCoin>,
 }
 
 impl RandomLeaderElector {
-    pub fn new(committee: &Committee, window: usize) -> Self {
+    pub fn new(committee: &Committee, leader_window: usize) -> Self {
         let mut names: Vec<_> = committee.authorities.keys().cloned().collect();
         names.sort();
 
@@ -32,7 +32,7 @@ impl RandomLeaderElector {
         Self {
             names,
             name_to_idx,
-            window,
+            leader_window,
             random_coins: HashMap::new(),
         }
     }
@@ -45,7 +45,7 @@ impl RandomLeaderElector {
         let mut leaders = Vec::new();
 
         let start = self.get_leader_idx(height);
-        let end = start + self.window;
+        let end = start + self.leader_window;
         for i in start..end {
             leaders.push(self.names[(i+self.names.len())%self.names.len()]);
         }
@@ -57,7 +57,7 @@ impl RandomLeaderElector {
         let position = self.name_to_idx[&name];
 
         let idx = (position + self.names.len() - start) % self.names.len();
-        (idx < self.window).then(|| idx)
+        (idx < self.leader_window).then(|| idx)
     }
 
     pub fn add_random_coin(&mut self, random_coin: RandomCoin) {

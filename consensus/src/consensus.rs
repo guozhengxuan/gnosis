@@ -38,6 +38,10 @@ impl Consensus {
         protocol: Protocol,
     ) -> ConsensusResult<()> {
         info!(
+            "Consensus leader window set to {}",
+            parameters.leader_window
+        );
+        info!(
             "Consensus timeout delay set to {} ms",
             parameters.timeout_delay
         );
@@ -89,7 +93,7 @@ impl Consensus {
         });
 
         // The leader elector algorithm.
-        let leader_elector = LeaderElector::new(&committee, parameters.window);
+        let leader_elector = LeaderElector::new(&committee, parameters.leader_window);
 
         // Make the mempool driver which will mediate our requests to the mempool.
         let mempool_driver = MempoolDriver::new(tx_consensus_mempool);

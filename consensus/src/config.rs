@@ -34,7 +34,7 @@ pub struct Parameters {
     pub random_ddos_chance: u64,
     pub fallback_length: u64,
     pub exp: u64,
-    pub window: usize,
+    pub leader_window: usize,
 }
 
 impl Default for Parameters {
@@ -51,7 +51,7 @@ impl Default for Parameters {
             random_ddos_chance: 5,
             fallback_length: 3,
             exp: 1,
-            window: 2,
+            leader_window: 2,
         }
     }
 }
