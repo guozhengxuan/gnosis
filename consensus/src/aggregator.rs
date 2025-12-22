@@ -1,7 +1,7 @@
 use crate::config::{Committee, Stake};
 use crate::core::SeqNumber;
 use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{HVote, RandomCoin, RandomnessShare, SPBProof, SPBVote, QC};
+use crate::messages::{HVote, QC, RandomCoin, RandomnessShare, SPBProof, SPBVote, TC, Timeout};
 use crypto::{PublicKey, Signature};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use threshold_crypto::PublicKeySet;
@@ -16,6 +16,7 @@ pub mod aggregator_tests;
 pub struct Aggregator {
     committee: Committee,
     hs_votes_aggregators: HashMap<SeqNumber, Box<QCMaker>>,
+    timeouts_aggregators: HashMap<SeqNumber, Box<TCMaker>>,
     fallback_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
     spb_votes_aggregators: HashMap<(SeqNumber, SeqNumber, u8), Box<ProofMaker>>,
     pre_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<ProofMaker>>,
@@ -27,6 +28,7 @@ impl Aggregator {
         Self {
             committee,
             hs_votes_aggregators: HashMap::new(),
+            timeouts_aggregators: HashMap::new(),
             fallback_votes_aggregators: HashMap::new(),
             spb_votes_aggregators: HashMap::new(),
             smvba_randomcoin_aggregators: HashMap::new(),
@@ -43,6 +45,14 @@ impl Aggregator {
             .entry(vote.height)
             .or_insert_with(|| Box::new(QCMaker::new()))
             .append(vote, &self.committee)
+    }
+
+    pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<Option<TC>> {
+        // Add the new timeout to our aggregator and see if we have a TC.
+        self.timeouts_aggregators
+            .entry(timeout.height)
+            .or_insert_with(|| Box::new(TCMaker::new()))
+            .append(timeout, &self.committee)
     }
 
     pub fn add_fallback_vote(&mut self, vote: HVote) -> ConsensusResult<Option<QC>> {
@@ -86,8 +96,9 @@ impl Aggregator {
     }
 
     // used in HotStuff
-    pub fn cleanup_hs_vote(&mut self, height: &SeqNumber) {
+    pub fn cleanup_hs(&mut self, height: &SeqNumber) {
         self.hs_votes_aggregators.retain(|k, _| k > height);
+        self.timeouts_aggregators.retain(|k, _| k >= height);
     }
 
     pub fn cleanup_spb_vote(&mut self, height: &SeqNumber) {
@@ -184,6 +195,50 @@ impl ProofMaker {
                 phase: phase + 1, //为下一个阶段产生proof
                 round,
                 shares: self.votes.clone(),
+            }));
+        }
+        Ok(None)
+    }
+}
+
+struct TCMaker {
+    weight: Stake,
+    votes: Vec<(PublicKey, Signature, SeqNumber)>,
+    used: HashSet<PublicKey>,
+}
+
+impl TCMaker {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            votes: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    /// Try to append a signature to a (partial) quorum.
+    pub fn append(
+        &mut self,
+        timeout: Timeout,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<TC>> {
+        let author = timeout.author;
+
+        // Ensure it is the first time this authority votes.
+        ensure!(
+            self.used.insert(author),
+            ConsensusError::AuthorityReuseinTC(author)
+        );
+
+        // Add the timeout to the accumulator.
+        self.votes
+            .push((author, timeout.signature, timeout.high_qc.height));
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0; // Ensures TC is only created once.
+            return Ok(Some(TC {
+                height: timeout.height,
+                votes: self.votes.clone(),
             }));
         }
         Ok(None)

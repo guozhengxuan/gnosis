@@ -5,8 +5,7 @@ use crate::filter::FilterInput;
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
 use crate::messages::{
-    Block, HVote, MDoneAndShare, MHalt, MPreVote, MVote, MVoteTag, PrePare, PreVoteTag,
-    RandomnessShare, SPBProof, SPBValue, SPBVote, QC,
+    Block, HVote, MDoneAndShare, MHalt, MPreVote, MVote, MVoteTag, PrePare, PreVoteTag, QC, RandomnessShare, SPBProof, SPBValue, SPBVote, TC, Timeout
 };
 use crate::synchronizer::Synchronizer;
 use crate::timer::Timer;
@@ -44,6 +43,8 @@ pub enum ConsensusMessage {
     HsPropose(Block),
     HSVote(HVote),
     HsLoopBack(Block),
+    HsTimeout(Timeout),
+    HsTC(TC),
     SyncRequest(Digest, PublicKey),
     SyncReply(Block),
     SPBPropose(SPBValue, SPBProof),
@@ -83,7 +84,7 @@ pub struct Core {
     last_committed_height: SeqNumber,
     unhandle_message: VecDeque<(SeqNumber, ConsensusMessage)>,
     high_qc: QC,
-    timer: Timer,
+    hs_timer: Timer,
     aggregator: Aggregator,
     opt_path: bool,
     pes_path: bool,
@@ -131,6 +132,7 @@ impl Core {
     ) -> Self {
         let aggregator = Aggregator::new(committee.clone());
         let fallback_length = parameters.fallback_length.clone();
+        let hs_timer = Timer::new(parameters.timeout_delay);
         let mut core = Self {
             name,
             committee,
@@ -154,7 +156,7 @@ impl Core {
             last_committed_height: 0,
             unhandle_message: VecDeque::new(),
             high_qc: QC::genesis(),
-            timer: Timer::new(),
+            hs_timer,
             aggregator,
             opt_path,
             pes_path,
@@ -186,12 +188,12 @@ impl Core {
     //initlization epoch
     fn epoch_init(&mut self, epoch: u64) {
         //清除之前的消息
-        self.leader_elector = LeaderElector::new(&self.committee, self.parameters.leader_window);
+        self.leader_elector = LeaderElector::new(self.committee.clone());
         self.aggregator = Aggregator::new(self.committee.clone());
         self.height = 1;
         self.epoch = epoch;
         self.high_qc = QC::genesis();
-        self.timer = Timer::new();
+        self.hs_timer = Timer::new(self.parameters.timeout_delay);
         self.last_voted_height = 0;
         self.last_committed_height = 0;
         self.smvba_y_flag.clear();
@@ -262,7 +264,7 @@ impl Core {
         self.store.write(key, value).await;
     }
 
-    fn increase_last_voted_round(&mut self, target: SeqNumber) {
+    fn increase_last_voted_height(&mut self, target: SeqNumber) {
         self.last_voted_height = max(self.last_voted_height, target);
     }
 
@@ -379,6 +381,41 @@ impl Core {
         Ok(())
     }
 
+    async fn local_timeout_round(&mut self) -> ConsensusResult<()> {
+        warn!("HotStuff Timeout reached for height {}", self.height);
+
+        // Increase the last voted round.
+        self.increase_last_voted_height(self.height);
+
+        // Make a timeout message.
+        let timeout = Timeout::new(
+            self.high_qc.clone(),
+            self.height,
+            self.name,
+            self.signature_service.clone(),
+        )
+        .await;
+        debug!("Created {:?}", timeout);
+
+        // Reset the timer.
+        self.hs_timer.reset();
+
+        // Broadcast the timeout message.
+        debug!("Broadcasting {:?}", timeout);
+        Synchronizer::transmit(
+            ConsensusMessage::HsTimeout(timeout.clone()),
+            &self.name,
+            None,
+            &self.network_filter,
+            &self.committee,
+            OPT,
+        )
+        .await?;
+
+        // Process our message.
+        self.handle_timeout(&timeout).await
+    }
+
     fn update_high_qc(&mut self, qc: &QC) {
         if qc.height > self.high_qc.height {
             self.high_qc = qc.clone();
@@ -390,17 +427,61 @@ impl Core {
         self.update_high_qc(qc);
     }
 
+    async fn handle_timeout(&mut self, timeout: &Timeout) -> ConsensusResult<()> {
+        debug!("Processing {:?}", timeout);
+        if timeout.height < self.height {
+            return Ok(());
+        }
+
+        // Ensure the timeout is well formed.
+        timeout.verify(&self.committee)?;
+
+        // Process the QC embedded in the timeout.
+        self.process_qc(&timeout.high_qc).await;
+
+        // Add the new vote to our aggregator and see if we have a quorum.
+        if let Some(tc) = self.aggregator.add_timeout(timeout.clone())? {
+            debug!("Assembled {:?}", tc);
+
+            // Try to advance the height.
+            self.advance_height(tc.height).await;
+
+            // Broadcast the TC.
+            debug!("Broadcasting {:?}", tc);
+            Synchronizer::transmit(
+                ConsensusMessage::HsTC(tc.clone()),
+                &self.name,
+                None,
+                &self.network_filter,
+                &self.committee,
+                OPT,
+            )
+            .await?;
+
+            // Make a new block if we are the next leader.
+            if self.name == self.leader_elector.get_leader(self.height) {
+                // self.generate_proposal(Some(tc)).await;
+            }
+        }
+        Ok(())
+    }
+
+
     #[async_recursion]
     async fn advance_height(&mut self, height: SeqNumber) {
         if height < self.height {
             return;
         }
 
-        // Cleanup the vote aggregator.
-        self.aggregator.cleanup_hs_vote(&self.height);
+        // Cleanup vote & timeout aggregator.
+        self.aggregator.cleanup_hs(&self.height);
+
         // Reset the timer and advance round.
+        self.hs_timer.reset();
         self.height = height + 1;
         debug!("Moved to round {}", self.height);
+
+        // Prepare for fallback.
         self.update_prepare_state(self.height);
         self.update_smvba_state(self.height, 1);
     }
@@ -447,7 +528,7 @@ impl Core {
         // Ensure the block proposer is one of the leaders.
         let digest = block.digest();
         ensure!(
-            self.leader_elector.index_as_leader(block.author, block.height).is_some(),
+            block.author == self.leader_elector.get_leader(block.height),
             ConsensusError::WrongBlockSender {
                 digest,
                 name: block.author,
@@ -480,11 +561,6 @@ impl Core {
     #[async_recursion]
     async fn process_opt_block(&mut self, block: &Block) -> ConsensusResult<()> {
         debug!("Processing OPT Block {:?}", block);
-
-        // Some leader succeeded in proposing, all back-up leaders reset their timers.
-        if self.leader_elector.index_as_leader(self.name, block.height).is_some() {
-            self.timer.reset(None);
-        }
 
         // Let's see if we have the last three ancestors of the block, that is:
         //      b0 <- |qc0; b1| <- |qc1; block|
@@ -557,22 +633,18 @@ impl Core {
             debug!("Created hs {:?}", vote);
             let message = ConsensusMessage::HSVote(vote.clone());
             if self.is_optmistic() {
-                // Send vote to all leaders of the next height.
-                let leaders = self.leader_elector.get_leaders(self.height + 1);
-                for leader in leaders.iter() {
-                    if self.name != *leader {
-                        Synchronizer::transmit(
-                            message.clone(),
-                            &self.name,
-                            Some(leader),
-                            &self.network_filter,
-                            &self.committee,
-                            OPT,
-                        ).await?;
-                    }
-                }
-                // If the node is one of the leaders of next height, handle its own vote.
-                if self.leader_elector.index_as_leader(self.name, self.height + 1).is_some() {
+                let leader = self.leader_elector.get_leader(self.height + 1);
+                if leader != self.name {
+                    Synchronizer::transmit(
+                        message,
+                        &self.name,
+                        Some(&leader),
+                        &self.network_filter,
+                        &self.committee,
+                        OPT,
+                    )
+                    .await?;
+                } else {
                     self.handle_opt_vote(&vote).await?;
                 }
             } else {
@@ -602,7 +674,7 @@ impl Core {
         }
 
         // Ensure we won't vote for contradicting blocks.
-        self.increase_last_voted_round(block.height);
+        self.increase_last_voted_height(block.height);
         // TODO [issue #15]: Write to storage preferred_round and last_voted_round.
         Some(HVote::new(&block, self.name, OPT, self.signature_service.clone()).await)
     }
@@ -615,16 +687,6 @@ impl Core {
             return Ok(());
         }
 
-        let leader_idx= self.leader_elector.index_as_leader(self.name, vote.height+1);
-        ensure!(
-            leader_idx.is_some(),
-            ConsensusError::WrongVoteRecipient {
-                digest: vote.digest(),
-                name: vote.author,
-                round: vote.height
-            }
-        );
-
         // Ensure the vote is well formed.
         vote.verify(&self.committee)?;
 
@@ -635,11 +697,10 @@ impl Core {
             // Process the QC.
             self.process_qc(&qc).await;
 
-            // Initialize the timer. 
-            // The i-th leader waits for (i * delta) time before proposing.
-            self.timer.reset(Some(leader_idx.unwrap() as u64 * self.parameters.timeout_delay));
-
-            // ???
+            // Make a new block if we are the next leader.
+            if self.name == self.leader_elector.get_leader(self.height) {
+                self.opt_propose().await?;
+            }
             if self.pes_path && !self.is_optmistic() {
                 self.fallback_propose(self.height, Some(self.high_qc.clone()))
                     .await?;
@@ -1724,8 +1785,8 @@ impl Core {
 
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
-        if self.opt_path && let Some(idx) = self.leader_elector.index_as_leader(self.name, self.height) {
-            self.timer.reset(Some(idx as u64 * self.parameters.timeout_delay));
+        if self.opt_path && self.name == self.leader_elector.get_leader(self.height) {
+            self.opt_propose().await.expect("Failed to send the first OPT block");
         }
 
         if !self.opt_path || (self.pes_path && !self.is_optmistic()) {
@@ -1768,7 +1829,7 @@ impl Core {
                         _=> Ok(()),
                     }
                 },
-                () = &mut self.timer => self.opt_propose().await,
+                () = &mut self.hs_timer => self.local_timeout_round().await,
                 else => break,
             };
             match result {

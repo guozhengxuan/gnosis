@@ -5,59 +5,25 @@ use crate::core::SeqNumber;
 use crate::messages::RandomCoin;
 use crypto::PublicKey;
 
-#[cfg(test)]
-#[path = "tests/leader_tests.rs"]
-pub mod leader_tests;
-
 pub type LeaderElector = RandomLeaderElector;
 
 pub struct RandomLeaderElector {
-    names: Vec<PublicKey>,
-    name_to_idx: HashMap<PublicKey, usize>,
-    leader_window: usize,
+    committee: Committee,
     random_coins: HashMap<(SeqNumber, SeqNumber), RandomCoin>,
 }
 
 impl RandomLeaderElector {
-    pub fn new(committee: &Committee, leader_window: usize) -> Self {
-        let mut names: Vec<_> = committee.authorities.keys().cloned().collect();
-        names.sort();
-
-        let name_to_idx: HashMap<_, _> = names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| (*name, idx))
-            .collect();
-
+    pub fn new(committee: Committee) -> Self {
         Self {
-            names,
-            name_to_idx,
-            leader_window,
+            committee,
             random_coins: HashMap::new(),
         }
     }
 
-    pub fn get_leader_idx(&self, height: SeqNumber) -> usize {
-        height as usize % self.names.len()
-    }
-
-    pub fn get_leaders(&self, height: SeqNumber) -> Vec<PublicKey> {
-        let mut leaders = Vec::new();
-
-        let start = self.get_leader_idx(height);
-        let end = start + self.leader_window;
-        for i in start..end {
-            leaders.push(self.names[(i+self.names.len())%self.names.len()]);
-        }
-        leaders
-    }
-
-    pub fn index_as_leader(&self, name: PublicKey, height: SeqNumber) -> Option<usize> {
-        let start = self.get_leader_idx(height);
-        let position = self.name_to_idx[&name];
-
-        let idx = (position + self.names.len() - start) % self.names.len();
-        (idx < self.leader_window).then(|| idx)
+    pub fn get_leader(&self, height: SeqNumber) -> PublicKey {
+        let mut keys: Vec<_> = self.committee.authorities.keys().cloned().collect();
+        keys.sort();
+        keys[height as usize % self.committee.size()]
     }
 
     pub fn add_random_coin(&mut self, random_coin: RandomCoin) {

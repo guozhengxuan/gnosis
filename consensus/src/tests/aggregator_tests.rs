@@ -50,6 +50,6 @@ fn cleanup() {
     assert_eq!(aggregator.hs_votes_aggregators.len(), 1);
 
     // Clean up the aggregator.
-    aggregator.cleanup_hs_vote(&2);
+    aggregator.cleanup_hs(&2);
     assert!(aggregator.hs_votes_aggregators.is_empty());
 }
