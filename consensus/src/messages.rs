@@ -410,12 +410,18 @@ impl fmt::Debug for TC {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub enum HSProof {
+    OPTProof((QC, QC)),
+    PESProof(QC),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PrePare {
     pub author: PublicKey,
     pub epoch: SeqNumber,
     pub height: SeqNumber,
     pub val: u8,
-    pub qc: QC,
+    pub proof: HSProof,
     pub signature: Signature,
 }
 
@@ -424,7 +430,7 @@ impl PrePare {
         author: PublicKey,
         epoch: SeqNumber,
         height: SeqNumber,
-        qc: QC,
+        proof: HSProof,
         val: u8,
         mut signature_service: SignatureService,
     ) -> Self {
@@ -433,7 +439,7 @@ impl PrePare {
             epoch,
             height,
             val,
-            qc,
+            proof,
             signature: Signature::default(),
         };
 
@@ -450,13 +456,23 @@ impl PrePare {
 
         self.signature.verify(&self.digest(), &self.author)?;
 
-        if self.qc != QC::genesis() {
-            self.qc.verify(committee)?;
+        match &self.proof {
+            HSProof::OPTProof((qc1, qc2)) => {
+                qc1.verify(committee)?;
+                qc2.verify(committee)?;
+                ensure!(
+                    self.height + 1 == qc1.height && qc1.height + 1 == qc2.height,
+                    ConsensusError::InvalidPrepareProof(self.height)
+                )
+            },
+            HSProof::PESProof(qc) => {
+                ensure!(
+                    qc.round == fallback_length,
+                    ConsensusError::InvalidPreParePESQC(qc.round)
+                )
+            }
         }
 
-        if self.qc.tag == PES && self.qc.round != fallback_length {
-            return Err(ConsensusError::InvalidPreParePESQC(self.qc.round));
-        }
         Ok(())
     }
 }

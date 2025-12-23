@@ -5,7 +5,7 @@ use crate::filter::FilterInput;
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
 use crate::messages::{
-    Block, HVote, MDoneAndShare, MHalt, MPreVote, MVote, MVoteTag, PrePare, PreVoteTag, QC, RandomnessShare, SPBProof, SPBValue, SPBVote, TC, Timeout
+    Block, HSProof, HVote, MDoneAndShare, MHalt, MPreVote, MVote, MVoteTag, PrePare, PreVoteTag, QC, RandomnessShare, SPBProof, SPBValue, SPBVote, TC, Timeout
 };
 use crate::synchronizer::Synchronizer;
 use crate::timer::Timer;
@@ -384,6 +384,10 @@ impl Core {
     }
 
     async fn local_timeout_round(&mut self) -> ConsensusResult<()> {
+        if !self.opt_path {
+            return Ok(())
+        }
+
         warn!("HotStuff Timeout reached for height {}", self.height);
 
         // Increase the last voted round.
@@ -536,11 +540,6 @@ impl Core {
         // Check the block is correctly formed.
         block.verify(&self.committee)?;
 
-        // 2. 终止 height-2 的 SMVBA
-        if self.pes_path && block.height > 2 {
-            self.terminate_smvba(block.height - 2)?;
-        }
-
         // Process the QC. This may allow us to advance round.
         self.process_qc(&block.qc).await;
 
@@ -580,47 +579,23 @@ impl Core {
         // Store the block only if we have already processed all its ancestors.
         self.store_block(block).await;
 
-        //again
-        if self.pes_path && block.height > 2 {
-            self.terminate_smvba(self.height - 2)?;
-        }
-
-        //TODO:
-        // 1. 对 height -1 的 block 发送 prepare-opt
-        if self.pes_path && block.height > 1 {
+        // b0 is `output` by opt path. We now InvokeDBA(b0, 0, proof of b0 being output).
+        let mut consecutive_rounds = b0.height + 1 == b1.height;
+        consecutive_rounds &= b1.height + 1 == block.height;
+        if self.pes_path && consecutive_rounds {
             self.active_prepare_phase(
-                block.height - 1,
-                block.qc.clone(), //qc h-1
+                b0.height,
+                HSProof::OPTProof((b1.qc, block.qc.clone())),
                 OPT,
             )
             .await?;
         }
-        //2. 在完全乐观情况下 延迟启动
-        if self.is_optmistic() && self.pes_path {
-            self.fallback_propose(block.height, Some(block.qc.clone()))
+
+        // Start fallback proposals with b1.height.
+        // TODO[1]: what is the second parameter in fallback_propose?
+        if self.is_optmistic() && self.pes_path && consecutive_rounds {
+            self.fallback_propose(b1.height, Some(block.qc.clone()))
                 .await?;
-        }
-
-        // The chain should have consecutive round numbers by construction.
-        let mut consecutive_rounds = b0.height + 1 == b1.height;
-        consecutive_rounds &= b1.height + 1 == block.height;
-        ensure!(
-            consecutive_rounds || block.qc == QC::genesis(),
-            ConsensusError::NonConsecutiveRounds {
-                rd1: b0.height,
-                rd2: b1.height,
-                rd3: block.height
-            }
-        );
-
-        if b0.height > self.last_committed_height {
-            self.commit(&b0).await?;
-
-            self.last_committed_height = b0.height;
-            debug!("Committed {:?}", b0);
-            if let Err(e) = self.commit_channel.send(b0.clone()).await {
-                warn!("Failed to send block through the commit channel: {}", e);
-            }
         }
 
         // Ensure the block's round is as expected.
@@ -720,6 +695,7 @@ impl Core {
     /***********************fallback**********************/
 
     fn fallback_message_filter(&mut self, epoch: SeqNumber, height: SeqNumber) -> bool {
+        // TODO[2]: set the right interval of outdated DBA.
         if self.height >= height + 2 || self.epoch > epoch {
             return false;
         }
@@ -785,7 +761,7 @@ impl Core {
                     self.broadcast_fallback_propose(block).await?;
                 } else if qc.round == self.fallback_length {
                     //启动prepare
-                    self.active_prepare_phase(qc.height, qc, PES).await?;
+                    self.active_prepare_phase(qc.height, HSProof::PESProof(qc), PES).await?;
                 }
             }
         }
@@ -859,7 +835,7 @@ impl Core {
     async fn active_prepare_phase(
         &mut self,
         height: SeqNumber,
-        qc: QC,
+        proof: HSProof,
         val: u8,
     ) -> ConsensusResult<()> {
         if self.prepare_tag.contains_key(&height) {
@@ -870,7 +846,7 @@ impl Core {
             self.name,
             self.epoch,
             height,
-            qc,
+            proof,
             val,
             self.signature_service.clone(),
         )
@@ -898,12 +874,10 @@ impl Core {
     async fn handle_par_prepare(&mut self, prepare: PrePare) -> ConsensusResult<()> {
         debug!("Processing {:?}", prepare);
         ensure!(
-            prepare.epoch == self.epoch && prepare.height + 2 > self.height,
+            // TODO[2]: set the right interval of outdated DBA.
+            prepare.epoch == self.epoch && prepare.height + 2 >= self.height,
             ConsensusError::TimeOutMessage(prepare.epoch, prepare.height)
         );
-        if self.parameters.exp == 1 {
-            prepare.verify(&self.committee, self.fallback_length)?;
-        }
 
         let opt_set = self
             .par_prepare_opts
@@ -921,66 +895,33 @@ impl Core {
                 }
                 opt_set.insert(prepare.author, prepare.signature.clone());
 
-                //如果没有广播过 0
-                if !self.prepare_tag.contains_key(&prepare.height) {
-                    let temp = PrePare::new(
-                        self.name,
-                        self.epoch,
-                        prepare.height,
-                        prepare.qc.clone(),
-                        OPT,
-                        self.signature_service.clone(),
-                    ).await;
+                // Fast commit path.
+                if opt_set.len() as u32 == self.committee.quorum_threshold() {
+                    if let HSProof::OPTProof((qc1, _)) = &prepare.proof {
+                        if let Some(bytes) = self.store.read(qc1.hash.to_vec()).await? {
+                            let b0: Block = bincode::deserialize(&bytes)?;
+                            if b0.height > self.last_committed_height {
+                                self.commit(&b0).await?;
 
-                    self.prepare_tag.insert(prepare.height, temp.clone());
-                    opt_set.insert(temp.author, temp.signature.clone());
+                                self.last_committed_height = b0.height;
 
-                    let message = ConsensusMessage::ParPrePare(temp);
-                    Synchronizer::transmit(
-                        message,
-                        &self.name,
-                        None,
-                        &self.network_filter_smvba,
-                        &self.committee,
-                        PES,
-                    )
-                    .await?;
-                }
+                                debug!("Committed from fast path {:?}", b0);
 
-                match opt_set.len() as u32 {
-                    len if len == self.committee.random_coin_threshold() => {
-                        //启动smvba
-                        let signatures = opt_set
-                            .into_iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-
-                        self.invoke_smvba(prepare.height, OPT, signatures, Some(prepare.qc.clone()))
-                            .await?;
-                    }
-                    len if len == self.committee.quorum_threshold() => {
-                        // Fast commit path.
-                        if let Some(bytes) = self.store.read(prepare.qc.hash.to_vec()).await? {
-                            let block: Block = bincode::deserialize(&bytes)?;
-                            if block.height > self.last_committed_height {
-                                self.commit(&block).await?;
-
-                                self.last_committed_height = block.height;
-
-                                debug!("Committed from fast path {:?}", block);
-
-                                if let Err(e) = self.commit_channel.send(block).await {
+                                if let Err(e) = self.commit_channel.send(b0).await {
                                     warn!("Failed to send block through the commit channel: {}", e);
                                 }
                             }
                         }
                         // Terminate the last sMVBA instance.
+                        // TODO[3]: check the height.
                         if self.pes_path && prepare.height >= 2 {
                             self.terminate_smvba(prepare.height - 1)?;
                         }
                     }
-                    _ => {}
                 }
+
+                // Invoke sMVBA with OPT.
+                self.invoke_smvba(prepare.height, Vec::new(), prepare.proof.clone()).await?;
             }
             PES => {
                 if pes_set.contains_key(&prepare.author) {
@@ -999,7 +940,7 @@ impl Core {
                         .or_insert(None)
                     {
                         let _qc = qc.clone();
-                        self.invoke_smvba(prepare.height, PES, signatures, Some(_qc))
+                        self.invoke_smvba(prepare.height, signatures, HSProof::PESProof(_qc))
                             .await?;
                     }
                 }
@@ -1067,21 +1008,27 @@ impl Core {
     async fn invoke_smvba(
         &mut self,
         height: SeqNumber,
-        val: u8,
         signatures: Vec<(PublicKey, Signature)>,
-        qc: Option<QC>,
+        proof: HSProof,
     ) -> ConsensusResult<()> {
         if *self.smvba_is_invoke.entry(height).or_insert(false) {
             return Ok(());
         }
         self.smvba_is_invoke.insert(height, true);
+
         let block;
-        if val == OPT {
-            block = Block::default();
-        } else {
-            block = self
-                .generate_proposal(height, self.fallback_length + 1, qc, None, PES)
+        let val;
+        match proof {
+            HSProof::OPTProof(_) => {
+                block = Block::default();
+                val = OPT;
+            },
+            HSProof::PESProof(qc) => {
+                block = self
+                .generate_proposal(height, self.fallback_length + 1, Some(qc), None, PES)
                 .await;
+                val = PES;
+            }
         }
         // let block = self
         //     .generate_proposal(height, self.fallback_length + 1, qc, PES)
@@ -1793,6 +1740,7 @@ impl Core {
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
         if self.opt_path && self.name == self.leader_elector.get_leader(self.height) {
+            self.hs_timer.reset();
             self.opt_propose(None).await.expect("Failed to send the first OPT block");
         }
 
