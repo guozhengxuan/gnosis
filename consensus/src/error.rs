@@ -117,6 +117,13 @@ pub enum ConsensusError {
         round: SeqNumber,
     },
 
+    #[error("Received timeout {digest} from name {name} at round {round}")]
+    WrongTimeoutRecipient {
+        digest: Digest,
+        name: PublicKey,
+        round: SeqNumber,
+    },
+
     #[error("Invalid payload")]
     InvalidPayload,
 

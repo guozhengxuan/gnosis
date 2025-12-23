@@ -61,6 +61,7 @@ pub fn block() -> Block {
     let (author, secret) = keys().pop().unwrap();
     let block = Block {
         qc: QC::genesis(),
+        tc: None,
         author,
         height: 1,
         epoch: 1,

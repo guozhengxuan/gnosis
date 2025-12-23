@@ -18,6 +18,7 @@ pub mod messages_tests;
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Block {
     pub qc: QC, //前一个节点的highQC
+    pub tc: Option<TC>,
     pub author: PublicKey,
     pub height: SeqNumber,
     pub epoch: SeqNumber,
@@ -30,6 +31,7 @@ pub struct Block {
 impl Block {
     pub async fn new(
         qc: QC,
+        tc: Option<TC>,
         author: PublicKey,
         height: SeqNumber,
         epoch: SeqNumber,
@@ -40,6 +42,7 @@ impl Block {
     ) -> Self {
         let block = Self {
             qc,
+            tc,
             author,
             height,
             epoch,
@@ -75,6 +78,11 @@ impl Block {
         // Check the embedded QC.
         if self.qc != QC::genesis() {
             self.qc.verify(committee)?;
+        }
+
+        // Check the TC embedded in the block (if any).
+        if let Some(ref tc) = self.tc {
+            tc.verify(committee)?;
         }
 
         Ok(())
@@ -345,7 +353,7 @@ impl Hash for Timeout {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.high_qc.round.to_le_bytes());
+        hasher.update(self.high_qc.height.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }

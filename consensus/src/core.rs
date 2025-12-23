@@ -299,6 +299,7 @@ impl Core {
         height: SeqNumber,
         round: SeqNumber,
         qc: Option<QC>,
+        tc: Option<TC>,
         tag: u8,
     ) -> Block {
         // Make a new block.
@@ -308,6 +309,7 @@ impl Core {
             .await;
         let block = Block::new(
             qc.unwrap_or(QC::genesis()),
+            tc,
             self.name,
             height,
             self.epoch,
@@ -400,20 +402,20 @@ impl Core {
         // Reset the timer.
         self.hs_timer.reset();
 
-        // Broadcast the timeout message.
-        debug!("Broadcasting {:?}", timeout);
+        // Send the timeout to next leader.
+        debug!("Sending timeout {:?} to next leader", timeout);
+        let leader = self.leader_elector.get_leader(self.height + 1);
         Synchronizer::transmit(
             ConsensusMessage::HsTimeout(timeout.clone()),
             &self.name,
-            None,
+            Some(&leader),
             &self.network_filter,
             &self.committee,
             OPT,
         )
         .await?;
 
-        // Process our message.
-        self.handle_timeout(&timeout).await
+        Ok(())
     }
 
     fn update_high_qc(&mut self, qc: &QC) {
@@ -433,6 +435,16 @@ impl Core {
             return Ok(());
         }
 
+        // Ensure the timeout is sent to leader.
+        ensure!(
+            self.name == self.leader_elector.get_leader(timeout.height),
+            ConsensusError::WrongTimeoutRecipient {
+                digest: timeout.digest(),
+                name: timeout.author,
+                round: timeout.height
+            }
+        );
+
         // Ensure the timeout is well formed.
         timeout.verify(&self.committee)?;
 
@@ -446,26 +458,11 @@ impl Core {
             // Try to advance the height.
             self.advance_height(tc.height).await;
 
-            // Broadcast the TC.
-            debug!("Broadcasting {:?}", tc);
-            Synchronizer::transmit(
-                ConsensusMessage::HsTC(tc.clone()),
-                &self.name,
-                None,
-                &self.network_filter,
-                &self.committee,
-                OPT,
-            )
-            .await?;
-
-            // Make a new block if we are the next leader.
-            if self.name == self.leader_elector.get_leader(self.height) {
-                // self.generate_proposal(Some(tc)).await;
-            }
+            // Propose a new block with tc.
+            self.opt_propose(Some(tc)).await?;
         }
         Ok(())
     }
-
 
     #[async_recursion]
     async fn advance_height(&mut self, height: SeqNumber) {
@@ -479,7 +476,7 @@ impl Core {
         // Reset the timer and advance round.
         self.hs_timer.reset();
         self.height = height + 1;
-        debug!("Moved to round {}", self.height);
+        debug!("Moved to height {}", self.height);
 
         // Prepare for fallback.
         self.update_prepare_state(self.height);
@@ -488,10 +485,10 @@ impl Core {
 
     /***********************two-chain hotstuff*************************/
 
-    async fn opt_propose(&mut self) -> ConsensusResult<()> {
+    async fn opt_propose(&mut self, tc: Option<TC>) -> ConsensusResult<()> {
         // Generate a new block and broadcast it.
         let block = self
-            .generate_proposal(self.height, 0, Some(self.high_qc.clone()), OPT)
+            .generate_proposal(self.height, 0, Some(self.high_qc.clone()), tc, OPT)
             .await;
 
         let message = ConsensusMessage::HsPropose(block.clone());
@@ -525,7 +522,7 @@ impl Core {
             return Err(ConsensusError::EpochEnd(self.epoch));
         }
         
-        // Ensure the block proposer is one of the leaders.
+        // Ensure the block is proposed by the leader.
         let digest = block.digest();
         ensure!(
             block.author == self.leader_elector.get_leader(block.height),
@@ -546,6 +543,11 @@ impl Core {
 
         // Process the QC. This may allow us to advance round.
         self.process_qc(&block.qc).await;
+
+        // Process the TC (if any). This may also allow us to advance round.
+        if let Some(ref tc) = block.tc {
+            self.advance_height(tc.height).await;
+        }
 
         // Let's see if we have the block's data. If we don't, the mempool
         // will get it and then make us resume processing this block.
@@ -667,8 +669,12 @@ impl Core {
     async fn make_opt_vote(&mut self, block: &Block) -> Option<HVote> {
         // Check if we can vote for this block.
         let safety_rule_1 = block.height > self.last_voted_height;
-        let safety_rule_2 = block.qc.height + 1 == block.height;
-
+        let mut safety_rule_2 = block.qc.height + 1 == block.height;
+        if let Some(ref tc) = block.tc {
+            let mut can_extend = tc.height + 1 == block.height;
+            can_extend &= block.qc.height >= *tc.high_qc_heights().iter().max().expect("Empty TC");
+            safety_rule_2 |= can_extend;
+        }
         if !(safety_rule_1 && safety_rule_2) {
             return None;
         }
@@ -699,7 +705,7 @@ impl Core {
 
             // Make a new block if we are the next leader.
             if self.name == self.leader_elector.get_leader(self.height) {
-                self.opt_propose().await?;
+                self.opt_propose(None).await?;
             }
             if self.pes_path && !self.is_optmistic() {
                 self.fallback_propose(self.height, Some(self.high_qc.clone()))
@@ -724,7 +730,7 @@ impl Core {
     }
 
     async fn fallback_propose(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
-        let block = self.generate_proposal(height, 1, qc, PES).await;
+        let block = self.generate_proposal(height, 1, qc, None, PES).await;
         self.broadcast_fallback_propose(block).await?;
         Ok(())
     }
@@ -774,7 +780,7 @@ impl Core {
             if qc.proposer == self.name {
                 if qc.round < self.fallback_length {
                     let block = self
-                        .generate_proposal(qc.height, qc.round + 1, Some(qc.clone()), PES)
+                        .generate_proposal(qc.height, qc.round + 1, Some(qc.clone()), None, PES)
                         .await;
                     self.broadcast_fallback_propose(block).await?;
                 } else if qc.round == self.fallback_length {
@@ -1033,6 +1039,7 @@ impl Core {
                     height,
                     self.fallback_length + 1,
                     Some(last_value.block.qc.clone()),
+                    None,
                     PES,
                 )
                 .await;
@@ -1073,7 +1080,7 @@ impl Core {
             block = Block::default();
         } else {
             block = self
-                .generate_proposal(height, self.fallback_length + 1, qc, PES)
+                .generate_proposal(height, self.fallback_length + 1, qc, None, PES)
                 .await;
         }
         // let block = self
@@ -1786,7 +1793,7 @@ impl Core {
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
         if self.opt_path && self.name == self.leader_elector.get_leader(self.height) {
-            self.opt_propose().await.expect("Failed to send the first OPT block");
+            self.opt_propose(None).await.expect("Failed to send the first OPT block");
         }
 
         if !self.opt_path || (self.pes_path && !self.is_optmistic()) {
@@ -1806,6 +1813,7 @@ impl Core {
                     match message {
                         ConsensusMessage::HsPropose(block) => self.handle_opt_proposal(&block).await,
                         ConsensusMessage::HSVote(vote) => self.handle_opt_vote(&vote).await,
+                        ConsensusMessage::HsTimeout(timeout) => self.handle_timeout(&timeout).await,
                         ConsensusMessage::HsLoopBack(block) => self.process_opt_block(&block).await,
                         ConsensusMessage::SyncRequest(digest, sender) => self.handle_sync_request(digest, sender).await,
                         ConsensusMessage::SyncReply(block) => self.handle_opt_proposal(&block).await,

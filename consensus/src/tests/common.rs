@@ -1,7 +1,7 @@
 use crate::config::Committee;
 use crate::core::SeqNumber;
 use crate::mempool::{ConsensusMempoolMessage, PayloadStatus};
-use crate::messages::{Block, HVote, QC};
+use crate::messages::{Block, HVote, QC, TC};
 use crate::OPT;
 use crypto::Hash as _;
 use crypto::{generate_keypair, Digest, PublicKey, SecretKey, Signature};
@@ -48,6 +48,7 @@ impl Committee {
 impl Block {
     pub fn new_from_key(
         qc: QC,
+        tc: Option<TC>,
         author: PublicKey,
         height: SeqNumber,
         payload: Vec<Digest>,
@@ -55,6 +56,7 @@ impl Block {
     ) -> Self {
         let block = Block {
             qc,
+            tc,
             author,
             height,
             epoch: 0,
@@ -121,7 +123,7 @@ impl PartialEq for HVote {
 // Fixture.
 pub fn block() -> Block {
     let (public_key, secret_key) = keys().pop().unwrap();
-    Block::new_from_key(QC::genesis(), public_key, 1, Vec::new(), &secret_key)
+    Block::new_from_key(QC::genesis(), None, public_key, 1, Vec::new(), &secret_key)
 }
 
 // Fixture.
@@ -164,6 +166,7 @@ pub fn chain(keys: Vec<(PublicKey, SecretKey)>) -> Vec<Block> {
             let (public_key, secret_key) = key;
             let block = Block::new_from_key(
                 latest_qc.clone(),
+                None,
                 *public_key,
                 1 + i as SeqNumber,
                 Vec::new(),
