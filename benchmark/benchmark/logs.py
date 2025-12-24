@@ -121,9 +121,6 @@ class LogParser:
 
         configs = {
             'consensus': {
-                'leader_window': int(
-                    search(r'Consensus leader window .* (\d+)', log).group(1)
-                ),
                 'timeout_delay': int(
                     search(r'Consensus timeout delay .* (\d+)', log).group(1)
                 ),
@@ -209,7 +206,6 @@ class LogParser:
         end_to_end_tps, end_to_end_bps, duration = self._end_to_end_throughput()
         end_to_end_latency = self._end_to_end_latency() * 1000
 
-        consensus_leader_window = self.configs[0]['consensus']['leader_window']
         consensus_timeout_delay = self.configs[0]['consensus']['timeout_delay']
         consensus_sync_retry_delay = self.configs[0]['consensus']['sync_retry_delay']
         consensus_max_payload_size = self.configs[0]['consensus']['max_payload_size']
@@ -233,7 +229,6 @@ class LogParser:
             f' Faults: {self.faults} nodes\n'
             f' Execution time: {round(duration):,} s\n'
             '\n'
-            f' Consensus leader window: {consensus_leader_window:,} \n'
             f' Consensus timeout delay: {consensus_timeout_delay:,} ms\n'
             f' Consensus sync retry delay: {consensus_sync_retry_delay:,} ms\n'
             f' Consensus max payloads size: {consensus_max_payload_size:,} B\n'

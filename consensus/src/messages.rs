@@ -60,6 +60,13 @@ impl Block {
         Block::default()
     }
 
+    pub fn opt(height: SeqNumber, author: PublicKey) -> Self {
+        let mut block = Block::default();
+        block.height = height;
+        block.author = author;
+        block
+    }
+
     pub fn parent(&self) -> &Digest {
         &self.qc.hash
     }

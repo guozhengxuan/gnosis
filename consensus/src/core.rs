@@ -81,6 +81,7 @@ pub struct Core {
     height: SeqNumber, // current height
     epoch: SeqNumber,  // current epoch
     last_voted_height: SeqNumber,
+    last_output_height: SeqNumber,
     last_committed_height: SeqNumber,
     unhandle_message: VecDeque<(SeqNumber, ConsensusMessage)>,
     high_qc: QC,
@@ -153,6 +154,7 @@ impl Core {
             height: 1,
             epoch: 0,
             last_voted_height: 0,
+            last_output_height: 0,
             last_committed_height: 0,
             unhandle_message: VecDeque::new(),
             high_qc: QC::genesis(),
@@ -195,6 +197,7 @@ impl Core {
         self.high_qc = QC::genesis();
         self.hs_timer = Timer::new(self.parameters.timeout_delay);
         self.last_voted_height = 0;
+        self.last_output_height = 0;
         self.last_committed_height = 0;
         self.smvba_y_flag.clear();
         self.smvba_n_flag.clear();
@@ -579,22 +582,28 @@ impl Core {
         // Store the block only if we have already processed all its ancestors.
         self.store_block(block).await;
 
-        // b0 is `output` by opt path. We now InvokeDBA(b0, 0, proof of b0 being output).
+        // Check whether b0 is `output` by opt path.
         let mut consecutive_rounds = b0.height + 1 == b1.height;
         consecutive_rounds &= b1.height + 1 == block.height;
-        if self.pes_path && consecutive_rounds {
+        if self.pes_path && consecutive_rounds && block.height > 2 {
+            // Update last output height.
+            if b0.height > self.last_output_height {
+                self.last_output_height = b0.height;
+            }
+
+            // InvokeDBA(b0, 0, proof of b0 being output).
             self.active_prepare_phase(
                 b0.height,
-                HSProof::OPTProof((b1.qc, block.qc.clone())),
+                HSProof::OPTProof((b1.qc.clone(), block.qc.clone())),
                 OPT,
-            )
-            .await?;
+            ).await?;
+
+            debug!("Phase 3 of active_prepare_phase of height: {}", b0.height);
         }
 
         // Start fallback proposals with b1.height.
-        // TODO[1]: what is the second parameter in fallback_propose?
-        if self.is_optmistic() && self.pes_path && consecutive_rounds {
-            self.fallback_propose(b1.height, Some(block.qc.clone()))
+        if self.is_optmistic() && self.pes_path && block.height > 1 {
+            self.fallback_propose(b1.height, Some(b1.qc))
                 .await?;
         }
 
@@ -602,6 +611,8 @@ impl Core {
         // This check is important: it prevents bad leaders from producing blocks
         // far in the future that may cause overflow on the round number.
         if block.height != self.height {
+            debug!("Exit before vote for opt block at height: {}, node height: {}",
+                block.height, self.height);
             return Ok(());
         }
 
@@ -651,6 +662,8 @@ impl Core {
             safety_rule_2 |= can_extend;
         }
         if !(safety_rule_1 && safety_rule_2) {
+            debug!("Failed to vote for block {}", block);
+            debug!("rule1: {} rule2: {}", safety_rule_1, safety_rule_2);
             return None;
         }
 
@@ -695,14 +708,7 @@ impl Core {
     /***********************fallback**********************/
 
     fn fallback_message_filter(&mut self, epoch: SeqNumber, height: SeqNumber) -> bool {
-        // TODO[2]: set the right interval of outdated DBA.
-        if self.height >= height + 2 || self.epoch > epoch {
-            return false;
-        }
-        // if *self.smvba_is_invoke.entry(height).or_insert(false) {
-        //     return false;
-        // }
-        true
+        height > self.last_output_height && self.epoch <= epoch
     }
 
     async fn fallback_propose(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
@@ -733,9 +739,6 @@ impl Core {
     }
 
     async fn make_fallback_vote(&mut self, block: &Block) -> Option<HVote> {
-        if block.height + 2 <= self.height {
-            return None;
-        }
         Some(HVote::new(&block, self.name, PES, self.signature_service.clone()).await)
     }
 
@@ -743,7 +746,7 @@ impl Core {
     async fn handle_fallback_vote(&mut self, vote: &HVote) -> ConsensusResult<()> {
         ensure!(
             self.fallback_message_filter(vote.epoch, vote.height),
-            ConsensusError::TimeOutMessage(vote.epoch, vote.height)
+            ConsensusError::EarlyFallbackMessage(vote.epoch, vote.height)
         );
 
         if self.parameters.exp == 1 {
@@ -772,7 +775,7 @@ impl Core {
     async fn handle_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
         ensure!(
             self.fallback_message_filter(block.epoch, block.height),
-            ConsensusError::TimeOutMessage(block.epoch, block.height)
+            ConsensusError::EarlyFallbackMessage(block.epoch, block.height)
         );
 
         if self.parameters.exp == 1 {
@@ -803,7 +806,7 @@ impl Core {
     async fn process_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
         ensure!(
             self.fallback_message_filter(block.epoch, block.height),
-            ConsensusError::TimeOutMessage(block.epoch, block.height)
+            ConsensusError::EarlyFallbackMessage(block.epoch, block.height)
         );
 
         self.store_block(block).await;
@@ -872,11 +875,9 @@ impl Core {
     }
 
     async fn handle_par_prepare(&mut self, prepare: PrePare) -> ConsensusResult<()> {
-        debug!("Processing {:?}", prepare);
         ensure!(
-            // TODO[2]: set the right interval of outdated DBA.
-            prepare.epoch == self.epoch && prepare.height + 2 >= self.height,
-            ConsensusError::TimeOutMessage(prepare.epoch, prepare.height)
+            prepare.epoch == self.epoch && prepare.height > self.last_committed_height,
+            ConsensusError::EarlyFallbackMessage(prepare.epoch, prepare.height)
         );
 
         let opt_set = self
@@ -901,19 +902,17 @@ impl Core {
                         if let Some(bytes) = self.store.read(qc1.hash.to_vec()).await? {
                             let b0: Block = bincode::deserialize(&bytes)?;
                             if b0.height > self.last_committed_height {
-                                self.commit(&b0).await?;
-
-                                self.last_committed_height = b0.height;
-
                                 debug!("Committed from fast path {:?}", b0);
 
+                                self.commit(&b0).await?;
+                                self.last_committed_height = b0.height;
                                 if let Err(e) = self.commit_channel.send(b0).await {
                                     warn!("Failed to send block through the commit channel: {}", e);
                                 }
                             }
                         }
                         // Terminate the last sMVBA instance.
-                        // TODO[3]: check the height.
+                        // TODO[#4]: IMPLEMENT RE-INTEPRET.
                         if self.pes_path && prepare.height >= 2 {
                             self.terminate_smvba(prepare.height - 1)?;
                         }
@@ -1020,7 +1019,7 @@ impl Core {
         let val;
         match proof {
             HSProof::OPTProof(_) => {
-                block = Block::default();
+                block = Block::opt(height, self.name);
                 val = OPT;
             },
             HSProof::PESProof(qc) => {
@@ -1030,9 +1029,7 @@ impl Core {
                 val = PES;
             }
         }
-        // let block = self
-        //     .generate_proposal(height, self.fallback_length + 1, qc, PES)
-        //     .await;
+
         let round = self.smvba_current_round.entry(height).or_insert(1).clone();
         let value = SPBValue::new(block, round, INIT_PHASE, val, signatures);
         let proof = SPBProof {
@@ -1052,23 +1049,7 @@ impl Core {
         _round: SeqNumber,
         _phase: u8,
     ) -> bool {
-        if self.epoch > epoch {
-            return false;
-        }
-        if self.height >= height + 2 {
-            return false;
-        }
-        // let cur_round = self.smvba_current_round.entry(height).or_insert(1);
-        // if *cur_round > round {
-        //     return false;
-        // }
-
-        // halt?
-        // if *self.smvba_halt_falg.entry(height).or_insert(false) {
-        //     return false;
-        // }
-
-        true
+        self.epoch <= epoch && height > self.last_committed_height
     }
 
     async fn broadcast_pes_propose(
@@ -1108,11 +1089,9 @@ impl Core {
         value: SPBValue,
         proof: SPBProof,
     ) -> ConsensusResult<()> {
-        //check message is timeout?
-
         ensure!(
             self.smvba_msg_filter(value.block.epoch, proof.height, proof.round, proof.phase),
-            ConsensusError::TimeOutMessage(proof.height, proof.round)
+            ConsensusError::SMVBATimeOutMessage(proof.height, proof.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1155,7 +1134,6 @@ impl Core {
         //vote
         if let Some(spb_vote) = self.make_spb_vote(&value).await {
             //将vote 广播给value 的 propose
-
             if self.name != value.block.author {
                 let message = ConsensusMessage::SPBVote(spb_vote);
                 Synchronizer::transmit(
@@ -1193,7 +1171,7 @@ impl Core {
                 spb_vote.round,
                 spb_vote.phase
             ),
-            ConsensusError::TimeOutMessage(spb_vote.height, spb_vote.round)
+            ConsensusError::SMVBATimeOutMessage(spb_vote.height, spb_vote.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1239,7 +1217,7 @@ impl Core {
         // check message is timeout?
         ensure!(
             self.smvba_msg_filter(value.block.epoch, proof.height, proof.round, proof.phase),
-            ConsensusError::TimeOutMessage(proof.height, proof.round)
+            ConsensusError::SMVBATimeOutMessage(proof.height, proof.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1326,7 +1304,7 @@ impl Core {
         // println!("Processing  {:?}", prevote);
         ensure!(
             self.smvba_msg_filter(prevote.epoch, prevote.height, prevote.round, FIN_PHASE),
-            ConsensusError::TimeOutMessage(prevote.height, prevote.round)
+            ConsensusError::SMVBATimeOutMessage(prevote.height, prevote.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1411,7 +1389,7 @@ impl Core {
         // println!("Processing  {:?}", mvote);
         ensure!(
             self.smvba_msg_filter(mvote.epoch, mvote.height, mvote.round, FIN_PHASE),
-            ConsensusError::TimeOutMessage(mvote.height, mvote.round)
+            ConsensusError::SMVBATimeOutMessage(mvote.height, mvote.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1469,7 +1447,7 @@ impl Core {
 
         ensure!(
             self.smvba_msg_filter(mdone.epoch, mdone.height, mdone.round, FIN_PHASE),
-            ConsensusError::TimeOutMessage(mdone.height, mdone.round)
+            ConsensusError::SMVBATimeOutMessage(mdone.height, mdone.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1512,7 +1490,7 @@ impl Core {
 
         ensure!(
             self.smvba_msg_filter(share.epoch, share.height, share.round, FIN_PHASE),
-            ConsensusError::TimeOutMessage(share.height, share.round)
+            ConsensusError::SMVBATimeOutMessage(share.height, share.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1629,7 +1607,7 @@ impl Core {
 
         ensure!(
             self.smvba_msg_filter(halt.epoch, halt.height, halt.round, FIN_PHASE),
-            ConsensusError::TimeOutMessage(halt.height, halt.round)
+            ConsensusError::SMVBATimeOutMessage(halt.height, halt.round)
         );
 
         if self.parameters.exp == 1 {
@@ -1671,7 +1649,7 @@ impl Core {
     }
 
     async fn process_par_out(&mut self, block: &Block) -> ConsensusResult<()> {
-        if self.epoch > block.epoch || self.height >= block.height + 2 {
+        if self.epoch > block.epoch || block.height <= self.last_committed_height {
             return Ok(());
         }
 
@@ -1795,7 +1773,7 @@ impl Core {
                     info!("---------------Epoch End {e}------------------");
                     return;
                 }
-                Err(ConsensusError::TimeOutMessage(..)) => {}
+                Err(ConsensusError::SMVBATimeOutMessage(..)) => {}
                 Err(e) => {
                     warn!("{}", e)
                 }

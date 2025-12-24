@@ -61,8 +61,11 @@ pub enum ConsensusError {
     #[error("Invalid prepare proof from height {0}")]
     InvalidPrepareProof(SeqNumber),
 
+    #[error("Early fallback message epoch {0}, height {1}")]
+    EarlyFallbackMessage(SeqNumber, SeqNumber),
+
     #[error("timeout smvba message height {0},round {1}")]
-    TimeOutMessage(SeqNumber, SeqNumber),
+    SMVBATimeOutMessage(SeqNumber, SeqNumber),
 
     #[error("Random coin with wrong leader")]
     RandomCoinWithWrongLeader,
