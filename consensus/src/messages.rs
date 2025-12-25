@@ -113,8 +113,8 @@ impl fmt::Debug for Block {
             write!(
                 f,
                 "{}: B(tag {}, author {}, height {}, qc {:?}, payload_len {})",
-                self.tag,
                 self.digest(),
+                self.tag,
                 self.author,
                 self.height,
                 self.qc,
@@ -124,8 +124,8 @@ impl fmt::Debug for Block {
             write!(
                 f,
                 "{}: B(tag {}, author {}, fallback height {}, qc {:?}, payload_len {})",
-                self.tag,
                 self.digest(),
+                self.tag,
                 self.author,
                 self.height,
                 self.qc,

@@ -287,18 +287,17 @@ impl Core {
 
         if !block.payload.is_empty() {
             info!(
-                "Created {} (fallback) height {} round {} tag {}",
-                block, block.height, block.round, block.tag
+                "Created {} round {} tag {}",
+                block, block.round, block.tag
             );
 
             #[cfg(feature = "benchmark")]
             for x in &block.payload {
                 // NOTE: This log entry is used to compute performance.
                 info!(
-                    "Created B{}({}) (fallback) height {} round {} tag {}",
+                    "Created B{}({}) round {} tag {}",
                     block.height,
                     base64::encode(x),
-                    block.height,
                     block.round,
                     block.tag
                 );
@@ -318,19 +317,18 @@ impl Core {
         {
             if !current.payload.is_empty() {
                 info!(
-                    "Committed {} (fallback) height {} round {} tag {}",
-                    current, current.height, current.round, current.tag
+                    "Committed {} round {} tag {}",
+                    current, current.round, current.tag
                 );
 
                 #[cfg(feature = "benchmark")]
                 for x in &current.payload {
                     info!(
-                        "Committed B{}({}) (fallback) height {} round {} tag {}",
-                        current_block.height,
+                        "Committed B{}({}) round {} tag {}",
+                        current.height,
                         base64::encode(x),
-                        current_block.height,
-                        current_block.round,
-                        current_block.tag
+                        current.round,
+                        current.tag
                     );
                 }
                 // Cleanup the mempool.
@@ -571,8 +569,6 @@ impl Core {
             ).await?;
 
             self.advance_fallback_height().await?;
-
-            debug!("Phase 3 of active_prepare_phase of height: {}", b0.height);
         }
 
         // Ensure the block's round is as expected.
@@ -737,7 +733,7 @@ impl Core {
     }
 
     async fn handle_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height == self.fallback_height {
+        if block.height != self.fallback_height {
             debug!("fallback block at fallback height: {} is outdated", block.height);
             return Ok(());
         }
@@ -761,7 +757,7 @@ impl Core {
     }
 
     async fn process_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height == self.fallback_height {
+        if block.height != self.fallback_height {
             debug!("fallback block at fallback height: {} is outdated", block.height);
             return Ok(());
         }
@@ -852,19 +848,33 @@ impl Core {
                 }
                 opt_set.insert(prepare.author, prepare.signature.clone());
 
-                // Fast commit path.
+                // DBA emits 0.
                 if opt_set.len() as u32 == self.committee.quorum_threshold() {
                     if let HSProof::OPTProof((qc1, _)) = &prepare.proof {
-                        if let Some(bytes) = self.store.read(qc1.hash.to_vec()).await? {
+                        if let Some(bytes) = self.store.read(qc1.hash.to_vec()).await? 
+                        {
+                            // Fast commit the opt block.
                             let b0: Block = bincode::deserialize(&bytes)?;
+                            let commit_height = b0.height;
                             self.commit(&b0).await?;
                             if let Err(e) = self.commit_channel.send(b0).await {
                                 warn!("Failed to send block through the commit channel: {}", e);
                             }
-                        }
-                        // Terminate the last sMVBA instance.
-                        if self.pes_path && prepare.height >= 2 {
-                            self.terminate_smvba(prepare.height - 1)?;
+
+                            // Terminate the last sMVBA instance.
+                            if self.pes_path && prepare.height >= 2 {
+                                debug!(
+                                    "Fallback height: {} committed opt block height: {}",
+                                    prepare.height,
+                                    commit_height
+                                );
+                                debug!(
+                                    "Terminate sMVBA with fallback height: {}",
+                                    prepare.height - 1,
+                                );
+                                self.terminate_smvba(prepare.height - 1)?;
+                                self.last_committed_fallback_height = prepare.height - 1;
+                            }
                         }
                     }
                 }
