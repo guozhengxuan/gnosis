@@ -143,7 +143,6 @@ impl QCMaker {
             return Ok(Some(QC {
                 hash: vote.hash.clone(),
                 height: vote.height,
-                epoch: vote.epoch,
                 round: vote.round,
                 tag: vote.tag,
                 proposer: vote.proposer,
@@ -294,7 +293,6 @@ impl SMVBARandomCoinMaker {
 
                 let random_coin = RandomCoin {
                     height: share.height,
-                    epoch: share.epoch,
                     round: share.round,
                     leader,
                     shares: self.shares.to_vec(),

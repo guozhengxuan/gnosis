@@ -21,7 +21,6 @@ pub struct Block {
     pub tc: Option<TC>,
     pub author: PublicKey,
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub payload: Vec<Digest>,
     pub signature: Signature,
     pub tag: u8,          //fallback
@@ -34,7 +33,6 @@ impl Block {
         tc: Option<TC>,
         author: PublicKey,
         height: SeqNumber,
-        epoch: SeqNumber,
         round: SeqNumber,
         payload: Vec<Digest>,
         mut signature_service: SignatureService,
@@ -45,7 +43,6 @@ impl Block {
             tc,
             author,
             height,
-            epoch,
             round,
             payload,
             signature: Signature::default(),
@@ -101,7 +98,6 @@ impl Hash for Block {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         for x in &self.payload {
             hasher.update(x);
         }
@@ -113,16 +109,29 @@ impl Hash for Block {
 
 impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "{}: B(author {}, height {}, epoch {}, qc {:?}, payload_len {})",
-            self.digest(),
-            self.author,
-            self.height,
-            self.epoch,
-            self.qc,
-            self.payload.iter().map(|x| x.size()).sum::<usize>(),
-        )
+        if self.tag == OPT {
+            write!(
+                f,
+                "{}: B(tag {}, author {}, height {}, qc {:?}, payload_len {})",
+                self.tag,
+                self.digest(),
+                self.author,
+                self.height,
+                self.qc,
+                self.payload.iter().map(|x| x.size()).sum::<usize>(),
+            )
+        } else {
+            write!(
+                f,
+                "{}: B(tag {}, author {}, fallback height {}, qc {:?}, payload_len {})",
+                self.tag,
+                self.digest(),
+                self.author,
+                self.height,
+                self.qc,
+                self.payload.iter().map(|x| x.size()).sum::<usize>(),
+            )
+        }
     }
 }
 
@@ -137,7 +146,6 @@ pub struct HVote {
     pub hash: Digest,
     pub height: SeqNumber,
     pub round: SeqNumber,
-    pub epoch: SeqNumber,
     pub proposer: PublicKey, // proposer of the block
     pub tag: u8,
     pub author: PublicKey,
@@ -154,7 +162,6 @@ impl HVote {
         let vote = Self {
             hash: block.digest(),
             height: block.height,
-            epoch: block.epoch,
             round: block.round,
             proposer: block.author,
             author,
@@ -186,7 +193,6 @@ impl Hash for HVote {
         hasher.update(self.height.to_le_bytes());
         hasher.update(self.round.to_le_bytes());
         hasher.update(self.tag.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.proposer.0);
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -194,11 +200,20 @@ impl Hash for HVote {
 
 impl fmt::Debug for HVote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "Vote(blockhash {}, proposer {}, height {}, epoch {},  voter {})",
-            self.hash, self.proposer, self.height, self.epoch, self.author
-        )
+        if self.tag == OPT {
+            write!(
+                f,
+                "Vote(blockhash {}, proposer {}, height {},  voter {})",
+                self.hash, self.proposer, self.height, self.author
+            )
+        } else {
+            write!(
+                f,
+                "Vote(blockhash {}, proposer {}, fallback height {},  voter {})",
+                self.hash, self.proposer, self.height, self.author
+            )
+        }
+        
     }
 }
 
@@ -208,34 +223,10 @@ impl fmt::Display for HVote {
     }
 }
 
-// #[derive(Clone, Serialize, Deserialize, Debug)]
-// pub enum PrePareProof {
-//     OPTProof(QC),
-//     PESProof(SPBProof),
-// }
-
-// impl PrePareProof {
-//     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
-//         match self {
-//             Self::OPTProof(qc) => {
-//                 if *qc != QC::genesis() {
-//                     qc.verify(committee)?;
-//                 }
-//                 Ok(())
-//             }
-//             Self::PESProof(proof) => {
-//                 ensure!(proof.phase == FIN_PHASE, ConsensusError::InvalidFinProof());
-//                 proof.verify(committee)
-//             }
-//         }
-//     }
-// }
-
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct QC {
     pub hash: Digest,
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub round: SeqNumber,
     pub tag: u8,
     pub proposer: PublicKey, // proposer of the block
@@ -285,7 +276,6 @@ impl Hash for QC {
         hasher.update(self.height.to_le_bytes());
         hasher.update(self.round.to_le_bytes());
         hasher.update(self.tag.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.proposer.0);
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -305,7 +295,6 @@ impl PartialEq for QC {
     fn eq(&self, other: &Self) -> bool {
         self.hash == other.hash
             && self.height == other.height
-            && self.epoch == self.epoch
             && self.proposer == other.proposer
     }
 }
@@ -425,7 +414,6 @@ pub enum HSProof {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PrePare {
     pub author: PublicKey,
-    pub epoch: SeqNumber,
     pub height: SeqNumber,
     pub val: u8,
     pub proof: HSProof,
@@ -435,7 +423,6 @@ pub struct PrePare {
 impl PrePare {
     pub async fn new(
         author: PublicKey,
-        epoch: SeqNumber,
         height: SeqNumber,
         proof: HSProof,
         val: u8,
@@ -443,7 +430,6 @@ impl PrePare {
     ) -> Self {
         let mut prepare = Self {
             author,
-            epoch,
             height,
             val,
             proof,
@@ -502,8 +488,8 @@ impl fmt::Debug for PrePare {
         }
         write!(
             f,
-            "PrePare(tag {}, epoch {},height {}, author {})",
-            tag, self.epoch, self.height, self.author
+            "PrePare(tag {}, fallback height {}, author {})",
+            tag, self.height, self.author
         )
     }
 }
@@ -587,8 +573,8 @@ impl fmt::Debug for SPBValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "SPBValue(proposer {}, epoch {}, height {} ,round {}, pahse {})",
-            self.block.author, self.block.epoch, self.block.height, self.round, self.phase
+            "SPBValue(proposer {}, fallback height {} ,round {}, pahse {})",
+            self.block.author, self.block.height, self.round, self.phase
         )
     }
 }
@@ -598,7 +584,6 @@ pub struct SPBVote {
     pub hash: Digest,
     pub phase: u8,
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub round: SeqNumber,
     pub proposer: PublicKey,
     pub author: PublicKey,
@@ -615,7 +600,6 @@ impl SPBVote {
             hash: value.digest(),
             phase: value.phase,
             height: value.block.height,
-            epoch: value.block.epoch,
             round: value.round,
             proposer: value.block.author,
             author,
@@ -657,7 +641,7 @@ impl fmt::Debug for SPBVote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "spb vote (author {}, height {}, round {}, phase {}, proposer {})",
+            "spb vote (author {}, fallback height {}, round {}, phase {}, proposer {})",
             self.author, self.height, self.round, self.phase, self.proposer,
         )
     }
@@ -721,7 +705,6 @@ impl fmt::Display for SPBProof {
 pub struct MDoneAndShare {
     pub author: PublicKey,
     pub signature: Signature,
-    pub epoch: SeqNumber,
     pub height: SeqNumber,
     pub round: SeqNumber,
     pub share: RandomnessShare,
@@ -731,7 +714,6 @@ impl MDoneAndShare {
     pub async fn new(
         author: PublicKey,
         mut signature_service: SignatureService,
-        epoch: SeqNumber,
         height: SeqNumber,
         round: SeqNumber,
         share: RandomnessShare,
@@ -739,7 +721,6 @@ impl MDoneAndShare {
         let mut done = Self {
             author,
             signature: Signature::default(),
-            epoch,
             height,
             round,
             share,
@@ -761,7 +742,6 @@ impl Hash for MDoneAndShare {
         hasher.update(self.author.0);
         hasher.update(self.round.to_be_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -770,8 +750,8 @@ impl fmt::Debug for MDoneAndShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "Done(author {},height {},epoch {},round {})",
-            self.author, self.height, self.epoch, self.round
+            "Done(author {}, fallback height {}, round {})",
+            self.author, self.height, self.round
         )
     }
 }
@@ -832,7 +812,6 @@ pub struct MPreVote {
     pub leader: PublicKey,
     pub round: SeqNumber,
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub tag: PreVoteTag,
 }
 
@@ -843,7 +822,6 @@ impl MPreVote {
         mut signature_service: SignatureService,
         round: SeqNumber,
         height: SeqNumber,
-        epoch: SeqNumber,
         tag: PreVoteTag,
     ) -> Self {
         let mut pvote = Self {
@@ -852,7 +830,6 @@ impl MPreVote {
             leader,
             round,
             height,
-            epoch,
             tag,
         };
         pvote.signature = signature_service.request_signature(pvote.digest()).await;
@@ -887,7 +864,6 @@ impl Hash for MPreVote {
         hasher.update(self.leader.0);
         hasher.update(self.round.to_be_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.tag.to_string());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -897,8 +873,8 @@ impl fmt::Debug for MPreVote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "PreVote(author {}, leader {},epoch {}, height {},round {}, tag {},)",
-            self.author, self.leader, self.epoch, self.height, self.round, self.tag
+            "PreVote(author {}, leader {}, fallback height {},round {}, tag {},)",
+            self.author, self.leader, self.height, self.round, self.tag
         )
     }
 }
@@ -967,7 +943,6 @@ pub struct MVote {
     pub leader: PublicKey,
     pub round: SeqNumber,
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub signature: Signature,
     pub tag: MVoteTag,
 }
@@ -979,7 +954,6 @@ impl MVote {
         mut signature_service: SignatureService,
         round: SeqNumber,
         height: SeqNumber,
-        epoch: SeqNumber,
         tag: MVoteTag,
     ) -> Self {
         let mut pvote = Self {
@@ -988,7 +962,6 @@ impl MVote {
             leader,
             round,
             height,
-            epoch,
             tag,
         };
         pvote.signature = signature_service.request_signature(pvote.digest()).await;
@@ -1023,7 +996,6 @@ impl Hash for MVote {
         hasher.update(self.author.0);
         hasher.update(self.round.to_be_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         hasher.update(self.tag.to_string());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -1033,8 +1005,8 @@ impl fmt::Debug for MVote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "MVote(author {}, leader {},epoch {}, height {}, round {}, tag {},)",
-            self.author, self.leader, self.epoch, self.height, self.round, self.tag
+            "MVote(author {}, leader {}, fllback height {}, round {}, tag {},)",
+            self.author, self.leader, self.height, self.round, self.tag
         )
     }
 }
@@ -1047,7 +1019,6 @@ pub struct MHalt {
     pub proof: SPBProof,
     pub round: SeqNumber,
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub signature: Signature,
 }
 
@@ -1062,7 +1033,6 @@ impl MHalt {
         let mut halt = Self {
             round: proof.round,
             height: proof.height,
-            epoch: value.block.epoch,
             author,
             value,
             leader,
@@ -1106,7 +1076,6 @@ impl Hash for MHalt {
         hasher.update(self.author.0);
         hasher.update(self.round.to_le_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -1115,8 +1084,8 @@ impl fmt::Debug for MHalt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "MHalt(author {},epoch {}, height {} ,round {}, leader {},)",
-            self.author, self.epoch, self.height, self.round, self.leader
+            "MHalt(author {}, fallback height {} ,round {}, leader {},)",
+            self.author, self.height, self.round, self.leader
         )
     }
 }
@@ -1125,7 +1094,6 @@ impl fmt::Debug for MHalt {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RandomnessShare {
     pub height: SeqNumber,
-    pub epoch: SeqNumber,
     pub round: SeqNumber,
     pub author: PublicKey,
     pub signature_share: SignatureShare,
@@ -1135,7 +1103,6 @@ pub struct RandomnessShare {
 impl RandomnessShare {
     pub async fn new(
         height: SeqNumber,
-        epoch: SeqNumber,
         round: SeqNumber,
         author: PublicKey,
         mut signature_service: SignatureService,
@@ -1143,7 +1110,6 @@ impl RandomnessShare {
         let mut hasher = Sha512::new();
         hasher.update(round.to_le_bytes());
         hasher.update(height.to_le_bytes());
-        hasher.update(epoch.to_le_bytes());
         let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
         let signature_share = signature_service
             .request_tss_signature(digest)
@@ -1152,7 +1118,6 @@ impl RandomnessShare {
         Self {
             round,
             height,
-            epoch,
             author,
             signature_share,
         }
@@ -1180,7 +1145,6 @@ impl Hash for RandomnessShare {
         let mut hasher = Sha512::new();
         hasher.update(self.round.to_le_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -1189,7 +1153,7 @@ impl fmt::Debug for RandomnessShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "RandomnessShare (author {}, height {},round {})",
+            "RandomnessShare (author {}, height {}, round {})",
             self.author, self.height, self.round,
         )
     }
@@ -1199,7 +1163,6 @@ impl fmt::Debug for RandomnessShare {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct RandomCoin {
     pub height: SeqNumber, //
-    pub epoch: SeqNumber,
     pub round: SeqNumber,
     pub leader: PublicKey, // elected leader of the view
     pub shares: Vec<RandomnessShare>,
@@ -1254,8 +1217,8 @@ impl fmt::Debug for RandomCoin {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "RandomCoin(epoch {}, height {},round {}, leader {})",
-            self.epoch, self.height, self.round, self.leader
+            "RandomCoin(fallback height {},round {}, leader {})",
+            self.height, self.round, self.leader
         )
     }
 }

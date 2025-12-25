@@ -129,9 +129,7 @@ impl Consensus {
                     mempool_driver,
                     synchronizer,
                     /* core_channel */ rx_core,
-                    tx_core,
                     rx_smvba,
-                    tx_smvba,
                     /* network_filter */ tx_filter,
                     tx_filter_smvba,
                     /* commit_channel */ tx_commit,
@@ -139,7 +137,7 @@ impl Consensus {
                     false,
                 );
                 tokio::spawn(async move {
-                    opt_path.run_epoch().await;
+                    opt_path.run().await;
                 });
             }
             Protocol::HotStuffAndSMVBA => {
@@ -155,9 +153,7 @@ impl Consensus {
                     mempool_driver,
                     synchronizer,
                     /* core_channel */ rx_core,
-                    tx_core,
                     rx_smvba,
-                    tx_smvba,
                     /* network_filter */ tx_filter,
                     tx_filter_smvba,
                     /* commit_channel */ tx_commit,
@@ -165,7 +161,7 @@ impl Consensus {
                     true,
                 );
                 tokio::spawn(async move {
-                    opt_with_pes_path.run_epoch().await;
+                    opt_with_pes_path.run().await;
                 });
             }
             Protocol::SMVBA => {
@@ -181,9 +177,7 @@ impl Consensus {
                     mempool_driver,
                     synchronizer,
                     /* core_channel */ rx_core,
-                    tx_core,
                     rx_smvba,
-                    tx_smvba,
                     /* network_filter */ tx_filter,
                     tx_filter_smvba,
                     /* commit_channel */ tx_commit,
@@ -191,7 +185,7 @@ impl Consensus {
                     true,
                 );
                 tokio::spawn(async move {
-                    pes_path.run_epoch().await;
+                    pes_path.run().await;
                 });
             }
             _ => {
