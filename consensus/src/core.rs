@@ -42,7 +42,6 @@ pub enum ConsensusMessage {
     HSVote(HVote),
     HsLoopBack(Block),
     HsTimeout(Timeout),
-    HsTC(TC),
     SyncRequest(Digest, PublicKey),
     SyncReply(Block),
     SPBPropose(SPBValue, SPBProof),
@@ -365,6 +364,9 @@ impl Core {
             return Ok(())
         }
 
+        // Received block at self.height, timeout for self.height + 1.
+        self.advance_height(self.height).await;
+
         warn!("HotStuff Timeout reached for height {}", self.height);
 
         // Increase the last voted round.
@@ -380,21 +382,19 @@ impl Core {
         .await;
         debug!("Created {:?}", timeout);
 
-        // Reset the timer.
-        self.timer.reset();
-
-        // Send the timeout to next leader.
-        debug!("Sending timeout {:?} to next leader", timeout);
-        let leader = self.leader_elector.get_leader(self.height + 1);
+        // Broadcast timeout.
+        debug!("Broadcast timeout {:?}", timeout);
         Synchronizer::transmit(
             ConsensusMessage::HsTimeout(timeout.clone()),
             &self.name,
-            Some(&leader),
+            None,
             &self.network_filter,
             &self.committee,
             OPT,
         )
         .await?;
+        
+        self.handle_timeout(&timeout).await?;
 
         Ok(())
     }
@@ -416,16 +416,6 @@ impl Core {
             return Ok(());
         }
 
-        // Ensure the timeout is sent to leader.
-        ensure!(
-            self.name == self.leader_elector.get_leader(timeout.height),
-            ConsensusError::WrongTimeoutRecipient {
-                digest: timeout.digest(),
-                name: timeout.author,
-                round: timeout.height
-            }
-        );
-
         // Ensure the timeout is well formed.
         timeout.verify(&self.committee)?;
 
@@ -439,8 +429,10 @@ impl Core {
             // Try to advance the height.
             self.advance_height(tc.height).await;
 
-            // Propose a new block with tc.
-            self.opt_propose(Some(tc)).await?;
+            // Propose a new block with tc if we are the next leader.
+            if self.name == self.leader_elector.get_leader(self.height) {
+                self.opt_propose(Some(tc)).await?;
+            }
         }
         Ok(())
     }
@@ -462,15 +454,6 @@ impl Core {
         // Prepare for fallback.
         self.update_prepare_state(self.height);
         self.update_smvba_state(self.height, 1);
-    }
-
-    async fn advance_fallback_height(&mut self) -> ConsensusResult<()> {
-        // Track and start fallback proposals for next DBA.
-        self.fallback_height += 1;
-        if self.is_optmistic() && self.pes_path {
-            self.fallback_propose().await?;
-        }
-        Ok(())
     }
 
     /***********************two-chain hotstuff*************************/
@@ -560,15 +543,16 @@ impl Core {
         // Check whether b0 is `output` by opt path.
         let mut consecutive_rounds = b0.height + 1 == b1.height;
         consecutive_rounds &= b1.height + 1 == block.height;
-        if self.pes_path && consecutive_rounds && block.height > 2 {
-            // InvokeDBA(fallback_height, 0, proof of b0 being output).
+        if self.pes_path && consecutive_rounds && block.height > 2
+        {
+            // Input 0 to next DBA.
+            self.fallback_height += 1;
+            debug!("Moved to fallback height: {}", self.fallback_height);
             self.active_prepare_phase(
                 self.fallback_height,
                 HSProof::OPTProof((b1.qc.clone(), block.qc.clone())),
                 OPT,
             ).await?;
-
-            self.advance_fallback_height().await?;
         }
 
         // Ensure the block's round is as expected.
@@ -633,7 +617,6 @@ impl Core {
 
         // Ensure we won't vote for contradicting blocks.
         self.increase_last_voted_height(block.height);
-        // TODO [issue #15]: Write to storage preferred_round and last_voted_round.
         Some(HVote::new(&block, self.name, OPT, self.signature_service.clone()).await)
     }
 
@@ -700,7 +683,7 @@ impl Core {
 
     #[async_recursion]
     async fn handle_fallback_vote(&mut self, vote: &HVote) -> ConsensusResult<()> {
-        if vote.height != self.fallback_height {
+        if vote.height < self.fallback_height {
             debug!("fallback vote at fallback height: {} is outdated", vote.height);
             return Ok(());
         }
@@ -722,9 +705,6 @@ impl Core {
                     // No output from opt path til fallback proposals at qc.height finish.
                     // InvokeDBA(fallback_height, 1, \bot).
                     self.active_prepare_phase(qc.height, HSProof::PESProof(qc), PES).await?;
-
-                    // Handle next DBA.
-                    self.advance_fallback_height().await?;
                 }
             }
         }
@@ -733,7 +713,7 @@ impl Core {
     }
 
     async fn handle_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height != self.fallback_height {
+        if block.height < self.fallback_height {
             debug!("fallback block at fallback height: {} is outdated", block.height);
             return Ok(());
         }
@@ -757,7 +737,7 @@ impl Core {
     }
 
     async fn process_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height != self.fallback_height {
+        if block.height < self.fallback_height {
             debug!("fallback block at fallback height: {} is outdated", block.height);
             return Ok(());
         }
@@ -798,6 +778,10 @@ impl Core {
             return Ok(());
         }
 
+        if val == PES {
+            debug!("active pes prepare at height: {}", height);
+        }
+
         let prepare = PrePare::new(
             self.name,
             height,
@@ -828,7 +812,11 @@ impl Core {
 
     async fn handle_par_prepare(&mut self, prepare: PrePare) -> ConsensusResult<()> {
         if prepare.height <= self.last_committed_fallback_height {
-            debug!("fallback prepare at fallback height: {} is outdated", prepare.height);
+            debug!(
+                "fallback prepare tag {} at fallback height: {} is outdated",
+                prepare.val,
+                prepare.height
+            );
             return Ok(());
         }
 
@@ -979,6 +967,7 @@ impl Core {
         let val;
         match proof {
             HSProof::OPTProof(_) => {
+                // TODO[#1]: fill with the complete opt block.
                 block = Block::opt(height, self.name);
                 val = OPT;
             },
@@ -1572,10 +1561,6 @@ impl Core {
 
         self.smvba_halt_falg.insert(halt.height, true);
 
-        if halt.value.val == OPT {
-            return Ok(());
-        }
-
         let block = halt.value.block;
         // Let's see if we have the block's data. If we don't, the mempool
         // will get it and then make us resume processing this block.
@@ -1593,7 +1578,7 @@ impl Core {
     }
 
     async fn process_par_out(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height <= self.last_committed_fallback_height {
+        if block.height < self.fallback_height {
             debug!(
                 "sMVBA output outdated block with fallback height: {} and round: {}",
                 block.height,
@@ -1602,10 +1587,22 @@ impl Core {
             return Ok(());
         }
 
+        // Start fallback proposals for next DBA.
+        debug!("Moved to fallback height: {}", self.fallback_height);
+        self.fallback_height += 1;
+
+        if self.is_optmistic() && self.pes_path {
+            self.fallback_propose().await?;
+        }
+
+        if block.tag == OPT {
+            return Ok(());
+        }
+
         self.store_block(block).await;
 
+        debug!("sMVBA Committed {:?}", block);
         self.commit(block).await?;
-        debug!("Committed {:?}", block);
         if let Err(e) = self.commit_channel.send(block.clone()).await {
             warn!("Failed to send block through the commit channel: {}", e);
         }
@@ -1624,7 +1621,7 @@ impl Core {
             self.opt_propose(None).await.expect("Failed to send the first OPT block");
         }
 
-        if !self.opt_path || (self.pes_path && !self.is_optmistic()) {
+        if self.pes_path {
             self.fallback_propose().await.expect("Failed to send the first PES block");
         }
 
