@@ -52,7 +52,7 @@ fn spawn_nodes(
                     rx_smvba,
                     tx_consensus_mempool,
                     tx_commit,
-                    Protocol::HotStuffAndSMVBA,
+                    Protocol::PBFTAndSMVBA,
                 )
                 .await
                 .unwrap();

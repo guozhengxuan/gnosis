@@ -38,7 +38,7 @@ def local(ctx):
             'max_payload_size': 500_000,
             'min_block_delay': 0
         },
-        'protocol': 1, # 0 for 2-chain HotStuff, 1 for ParBFT, 2 for SMVBA
+        'protocol': 1, # 0 for PBFT, 1 for ParBFT, 2 for SMVBA
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug=True).result()
@@ -133,7 +133,7 @@ def remote(ctx):
             'max_payload_size': 500_000,
             'min_block_delay': 100
         },
-        'protocol': 1, # 0 for 2-chain HotStuff, 1 for Ditto, 2 for 2-chain VABA
+        'protocol': 1, # 0 for PBFT, 1 for Ditto, 2 for 2-chain VABA
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug=False)

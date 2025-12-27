@@ -104,7 +104,7 @@ class LocalBench:
                 self._background_run(cmd, log_file)
             
             if self.node_parameters.protocol == 0:
-                Print.info('Running HotStuff')
+                Print.info('Running PBFT')
             elif self.node_parameters.protocol == 1:
                 Print.info('Running Ipotane')
             elif self.node_parameters.protocol == 2:

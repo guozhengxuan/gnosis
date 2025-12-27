@@ -179,7 +179,7 @@ This project is organized into several modules, each serving a specific purpose 
 ### Core Modules
 
 - **`consensus/`** - Core consensus protocol implementation
-  - Contains the main BFT consensus logic including HotStuff, ParBFT, and SMVBA protocols
+  - Contains the main BFT consensus logic including PBFT, ParBFT, and SMVBA protocols
   - Implements leader election, aggregation, synchronization, and message handling
   - Key files: `core.rs` (main consensus engine), `leader.rs` (leader election), `aggregator.rs` (vote aggregation)
 

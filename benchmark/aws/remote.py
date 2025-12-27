@@ -291,7 +291,7 @@ class Bench:
             raise BenchError('Failed to update nodes', e)
 
         if node_parameters.protocol == 0:
-            Print.info('Running HotStuff')
+            Print.info('Running PBFT')
         elif node_parameters.protocol == 1:
             Print.info('Running Ipotane')
         elif node_parameters.protocol == 2:

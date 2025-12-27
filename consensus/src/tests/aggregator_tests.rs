@@ -4,7 +4,7 @@ use crypto::Hash;
 #[test]
 fn add_vote() {
     let mut aggregator = Aggregator::new(committee());
-    let result = aggregator.add_hs_vote(vote());
+    let result = aggregator.add_pbft_vote(vote());
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 }
@@ -22,19 +22,19 @@ fn make_qc() {
     // material to make a valid QC.
     let (public_key, secret_key) = keys.pop().unwrap();
     let vote = HVote::new_from_key(hash.clone(), height, proposer, public_key, &secret_key);
-    let result = aggregator.add_hs_vote(vote);
+    let result = aggregator.add_pbft_vote(vote);
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 
     let (public_key, secret_key) = keys.pop().unwrap();
     let vote = HVote::new_from_key(hash.clone(), height, proposer, public_key, &secret_key);
-    let result = aggregator.add_hs_vote(vote);
+    let result = aggregator.add_pbft_vote(vote);
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 
     let (public_key, secret_key) = keys.pop().unwrap();
     let vote = HVote::new_from_key(hash.clone(), height, proposer, public_key, &secret_key);
-    match aggregator.add_hs_vote(vote) {
+    match aggregator.add_pbft_vote(vote) {
         Ok(Some(qc)) => assert!(qc.verify(&committee()).is_ok()),
         _ => assert!(false),
     }
@@ -45,11 +45,11 @@ fn cleanup() {
     let mut aggregator = Aggregator::new(committee());
 
     // Add a vote and ensure it is in the aggregator memory.
-    let result = aggregator.add_hs_vote(vote());
+    let result = aggregator.add_pbft_vote(vote());
     assert!(result.is_ok());
-    assert_eq!(aggregator.hs_votes_aggregators.len(), 1);
+    assert_eq!(aggregator.pbft_votes_aggregators.len(), 1);
 
     // Clean up the aggregator.
-    aggregator.cleanup_hs(&2);
-    assert!(aggregator.hs_votes_aggregators.is_empty());
+    aggregator.cleanup_pbft(&2);
+    assert!(aggregator.pbft_votes_aggregators.is_empty());
 }

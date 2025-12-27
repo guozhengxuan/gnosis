@@ -27,6 +27,15 @@ pub struct Block {
     pub round: SeqNumber, // fallback
 }
 
+// A block with OPT tag is a PBFT block.
+
+// A PBFT block can be committed if a node aggregates a QC with
+// 2f+1 HVotes with round=2 (see HVote with OPT tag below).
+
+// To guarantee safety across views, a valid PBFT block should
+// also carry either a QC (containing proposer's high QC) or a
+// TC (aggregated by 2f+1 timeouts, each containing the high QC
+// of its sender).
 impl Block {
     pub async fn new(
         qc: QC,
@@ -141,6 +150,8 @@ impl fmt::Display for Block {
     }
 }
 
+// HVote with OPT tag serves as prepare/commit in PBFT.
+// An OPT HVote with round=1 is a prepare, round=2 is a commit.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HVote {
     pub hash: Digest,
@@ -155,6 +166,7 @@ pub struct HVote {
 impl HVote {
     pub async fn new(
         block: &Block,
+        round: SeqNumber,
         author: PublicKey,
         tag: u8,
         mut signature_service: SignatureService,
@@ -162,7 +174,7 @@ impl HVote {
         let vote = Self {
             hash: block.digest(),
             height: block.height,
-            round: block.round,
+            round,
             proposer: block.author,
             author,
             tag,
@@ -368,7 +380,7 @@ pub struct TC {
 
 impl TC {
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
-        // Ensure the QC has a quorum.
+        // Ensure the TC has a quorum.
         let mut weight = 0;
         let mut used = HashSet::new();
         for (name, _, _) in self.votes.iter() {
@@ -406,17 +418,11 @@ impl fmt::Debug for TC {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub enum HSProof {
-    OPTProof((QC, QC)),
-    PESProof(QC),
-}
-
-#[derive(Clone, Serialize, Deserialize)]
 pub struct PrePare {
     pub author: PublicKey,
     pub height: SeqNumber,
     pub val: u8,
-    pub proof: HSProof,
+    pub proof: QC,
     pub signature: Signature,
 }
 
@@ -424,7 +430,7 @@ impl PrePare {
     pub async fn new(
         author: PublicKey,
         height: SeqNumber,
-        proof: HSProof,
+        proof: QC,
         val: u8,
         mut signature_service: SignatureService,
     ) -> Self {
@@ -449,21 +455,12 @@ impl PrePare {
 
         self.signature.verify(&self.digest(), &self.author)?;
 
-        match &self.proof {
-            HSProof::OPTProof((qc1, qc2)) => {
-                qc1.verify(committee)?;
-                qc2.verify(committee)?;
-                ensure!(
-                    self.height + 1 == qc1.height && qc1.height + 1 == qc2.height,
-                    ConsensusError::InvalidPrepareProof(self.height)
-                )
-            },
-            HSProof::PESProof(qc) => {
-                ensure!(
-                    qc.round == fallback_length,
-                    ConsensusError::InvalidPreParePESQC(qc.round)
-                )
-            }
+        self.proof.verify(committee)?;
+        if self.val == PES {
+            ensure!(
+                self.proof.round == fallback_length,
+                ConsensusError::InvalidPreParePESQC(self.proof.round)
+            )
         }
 
         Ok(())
@@ -1166,51 +1163,6 @@ pub struct RandomCoin {
     pub round: SeqNumber,
     pub leader: PublicKey, // elected leader of the view
     pub shares: Vec<RandomnessShare>,
-}
-
-impl RandomCoin {
-    // pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
-    //     // Ensure the QC has a quorum.
-    //     let mut weight = 0;
-    //     let mut used = HashSet::new();
-    //     for share in self.shares.iter() {
-    //         let name = share.author;
-    //         ensure!(
-    //             !used.contains(&name),
-    //             ConsensusError::AuthorityReuseinCoin(name)
-    //         );
-    //         let voting_rights = committee.stake(&name);
-    //         ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(name));
-    //         used.insert(name);
-    //         weight += voting_rights;
-    //     }
-    //     ensure!(
-    //         weight >= committee.random_coin_threshold(), //f+1
-    //         ConsensusError::RandomCoinRequiresQuorum
-    //     );
-
-    //     let mut sigs = BTreeMap::new(); //构建BTree选择leader
-    //                                     // Check the random shares.
-    //     for share in &self.shares {
-    //         share.verify(committee, pk_set)?;
-    //         sigs.insert(committee.id(share.author), share.signature_share.clone());
-    //     }
-    //     if let Ok(sig) = pk_set.combine_signatures(sigs.iter()) {
-    //         let id = usize::from_be_bytes((&sig.to_bytes()[0..8]).try_into().unwrap())
-    //             % committee.size();
-    //         let mut keys: Vec<_> = committee.authorities.keys().cloned().collect();
-    //         keys.sort();
-    //         let leader = keys[id];
-    //         ensure!(
-    //             leader == self.leader,
-    //             ConsensusError::RandomCoinWithWrongLeader
-    //         );
-    //     } else {
-    //         ensure!(true, ConsensusError::RandomCoinWithWrongShares);
-    //     }
-
-    //     Ok(())
-    // }
 }
 
 impl fmt::Debug for RandomCoin {

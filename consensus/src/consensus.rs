@@ -116,8 +116,8 @@ impl Consensus {
         .await;
         sleep(Duration::from_millis(parameters.node_sync_time)).await;
         match protocol {
-            Protocol::HotStuff => {
-                // Run HotStuff
+            Protocol::PBFT => {
+                // Run PBFT
                 let mut opt_path = Core::new(
                     name,
                     committee,
@@ -140,8 +140,8 @@ impl Consensus {
                     opt_path.run().await;
                 });
             }
-            Protocol::HotStuffAndSMVBA => {
-                // Run AsyncHotStuff
+            Protocol::PBFTAndSMVBA => {
+                // Run AsyncPBFT
                 let mut opt_with_pes_path = Core::new(
                     name,
                     committee,

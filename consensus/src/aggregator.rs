@@ -11,11 +11,9 @@ use threshold_crypto::PublicKeySet;
 #[path = "tests/aggregator_tests.rs"]
 pub mod aggregator_tests;
 
-// In HotStuff, votes/timeouts aggregated by round
-// In VABA and async fallback, votes aggregated by round, timeouts/coin_share aggregated by view
 pub struct Aggregator {
     committee: Committee,
-    hs_votes_aggregators: HashMap<SeqNumber, Box<QCMaker>>,
+    pbft_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
     timeouts_aggregators: HashMap<SeqNumber, Box<TCMaker>>,
     fallback_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
     spb_votes_aggregators: HashMap<(SeqNumber, SeqNumber, u8), Box<ProofMaker>>,
@@ -27,7 +25,7 @@ impl Aggregator {
     pub fn new(committee: Committee) -> Self {
         Self {
             committee,
-            hs_votes_aggregators: HashMap::new(),
+            pbft_votes_aggregators: HashMap::new(),
             timeouts_aggregators: HashMap::new(),
             fallback_votes_aggregators: HashMap::new(),
             spb_votes_aggregators: HashMap::new(),
@@ -36,13 +34,10 @@ impl Aggregator {
         }
     }
 
-    pub fn add_hs_vote(&mut self, vote: HVote) -> ConsensusResult<Option<QC>> {
-        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
-        // with different round numbers or different digests.
-
+    pub fn add_pbft_vote(&mut self, vote: HVote) -> ConsensusResult<Option<QC>> {
         // Add the new vote to our aggregator and see if we have a QC.
-        self.hs_votes_aggregators
-            .entry(vote.height)
+        self.pbft_votes_aggregators
+            .entry((vote.height, vote.round))
             .or_insert_with(|| Box::new(QCMaker::new()))
             .append(vote, &self.committee)
     }
@@ -63,9 +58,6 @@ impl Aggregator {
     }
 
     pub fn add_spb_vote(&mut self, vote: SPBVote) -> ConsensusResult<Option<SPBProof>> {
-        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
-        // with different round numbers or different digests.
-
         // Add the new vote to our aggregator and see if we have a QC.
         self.spb_votes_aggregators
             .entry((vote.height, vote.round, vote.phase))
@@ -74,9 +66,6 @@ impl Aggregator {
     }
 
     pub fn add_pre_vote(&mut self, vote: SPBVote) -> ConsensusResult<Option<SPBProof>> {
-        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
-        // with different round numbers or different digests.
-
         // Add the new vote to our aggregator and see if we have a QC.
         self.pre_votes_aggregators
             .entry((vote.height, vote.round))
@@ -95,9 +84,9 @@ impl Aggregator {
             .append(share, &self.committee, pk_set)
     }
 
-    // used in HotStuff
-    pub fn cleanup_hs(&mut self, height: &SeqNumber) {
-        self.hs_votes_aggregators.retain(|k, _| k > height);
+    // used in PBFT
+    pub fn cleanup_pbft(&mut self, height: &SeqNumber) {
+        self.pbft_votes_aggregators.retain(|(k, _), _| k > height);
         self.timeouts_aggregators.retain(|k, _| k >= height);
     }
 

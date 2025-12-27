@@ -9,15 +9,15 @@ pub type EpochNumber = u128;
 
 #[derive(Serialize, Deserialize)]
 pub enum Protocol {
-    HotStuff,
-    HotStuffAndSMVBA,
+    PBFT,
+    PBFTAndSMVBA,
     SMVBA,
     Others,
 }
 
 impl Default for Protocol {
     fn default() -> Self {
-        Protocol::HotStuffAndSMVBA
+        Protocol::PBFTAndSMVBA
     }
 }
 

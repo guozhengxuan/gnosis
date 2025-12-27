@@ -67,8 +67,8 @@ impl Node {
             SignatureService::new(secret_key, Some(tss_keys.secret.into_inner()));
 
         let protocol = match parameters.protocol {
-            0 => Protocol::HotStuff,
-            1 => Protocol::HotStuffAndSMVBA,
+            0 => Protocol::PBFT,
+            1 => Protocol::PBFTAndSMVBA,
             2 => Protocol::SMVBA,
             _ => {
                 warn!("Undefined protocol type!");
