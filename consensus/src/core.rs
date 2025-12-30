@@ -81,6 +81,7 @@ pub struct Core {
     epoch: SeqNumber,  // current epoch
     last_voted_height: SeqNumber,
     last_committed_height: SeqNumber,
+    fallback_is_invoke: HashMap<SeqNumber, bool>,
     unhandle_message: VecDeque<(SeqNumber, ConsensusMessage)>,
     high_qc: QC,
     timer: Timer,
@@ -152,6 +153,7 @@ impl Core {
             epoch: 0,
             last_voted_height: 0,
             last_committed_height: 0,
+            fallback_is_invoke: HashMap::new(),
             unhandle_message: VecDeque::new(),
             high_qc: QC::genesis(),
             timer: Timer::new(),
@@ -194,6 +196,7 @@ impl Core {
         self.timer = Timer::new();
         self.last_voted_height = 0;
         self.last_committed_height = 0;
+        self.fallback_is_invoke.clear();
         self.smvba_y_flag.clear();
         self.smvba_n_flag.clear();
         self.smvba_d_flag.clear();
@@ -291,7 +294,6 @@ impl Core {
         return !self.parameters.ddos && !self.parameters.random_ddos;
     }
 
-    #[async_recursion]
     async fn generate_proposal(
         &mut self,
         height: SeqNumber,
@@ -523,7 +525,7 @@ impl Core {
             .await?;
         }
 
-        if self.pes_path && !self.smvba_is_invoke.contains_key(&block.height) {
+        if self.pes_path {
             self.invoke_fallback(block.height, Some(block.qc.clone())).await?;
         }
 
@@ -626,9 +628,15 @@ impl Core {
             // Process the QC.
             self.process_qc(&qc).await;
 
-            // Initialize the timer. 
+            // Initialize the timer.
             // The i-th leader waits for (i * delta) time before proposing.
-            self.timer.reset(Some(leader_idx.unwrap() as u64 * self.parameters.timeout_delay));
+            let leader_idx_val = leader_idx.unwrap();
+            if leader_idx_val == 0 {
+                // 0-th leader proposes immediately to avoid event loop starvation
+                self.opt_propose().await?;
+            } else {
+                self.timer.reset(Some(leader_idx_val as u64 * self.parameters.timeout_delay));
+            }
         }
         Ok(())
     }
@@ -648,6 +656,11 @@ impl Core {
     }
 
     async fn invoke_fallback(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
+        if self.fallback_is_invoke.contains_key(&height) {
+            return Ok(());
+        }
+        self.fallback_is_invoke.insert(height, true);
+
         let block = self.generate_proposal(height, 1, qc, PES).await;
         self.broadcast_fallback_propose(block).await?;
         Ok(())
@@ -1674,7 +1687,12 @@ impl Core {
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
         if self.opt_path && let Some(idx) = self.leader_elector.index_as_leader(self.name, self.height) {
-            self.timer.reset(Some(idx as u64 * self.parameters.timeout_delay));
+            if idx == 0 {
+                // 0-th leader proposes immediately
+                let _ = self.opt_propose().await;
+            } else {
+                self.timer.reset(Some(idx as u64 * self.parameters.timeout_delay));
+            }
         }
 
         if !self.opt_path || (self.pes_path && !self.is_optmistic()) {

@@ -21,17 +21,17 @@ def local(ctx):
     node_params = {
         'consensus': {
             'node_sync_time': 500,
-            'timeout_delay': 20,
+            'timeout_delay': 500,
             'sync_retry_delay': 10_000,
             'max_payload_size': 1_000,
             'min_block_delay': 0,
-            'network_delay': 10_000, # message delay on the leaders' proposals during DDoS
+            'network_delay': 15_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
-            'random_ddos': True,
-            'random_ddos_chance': 10,
+            'random_ddos': False,
+            'random_ddos_chance': 0,
             'fallback_length': 2,
             'exp': 0, # verification switch
-            'leader_window': 3
+            'leader_window': 2
         },
         'mempool': {
             'queue_capacity': 100_000,
@@ -39,10 +39,10 @@ def local(ctx):
             'max_payload_size': 500_000,
             'min_block_delay': 0
         },
-        'protocol': 1, # 0 for 2-chain HotStuff, 1 for Gnosis, 2 for SMVBA
+        'protocol': 0, # 0 for 2-chain HotStuff, 1 for Gnosis, 2 for SMVBA
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug=True).result()
+        ret = LocalBench(bench_params, node_params).run(debug=False).result()
         print(ret)
     except BenchError as e:
         Print.error(e)
