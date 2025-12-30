@@ -2,7 +2,7 @@ use crate::config::{Committee, Stake};
 use crate::core::SeqNumber;
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::{HVote, RandomCoin, RandomnessShare, SPBProof, SPBVote, QC};
-use crypto::{PublicKey, Signature};
+use crypto::{Digest, PublicKey, Signature};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use threshold_crypto::PublicKeySet;
 // use std::convert::TryInto;
@@ -15,7 +15,7 @@ pub mod aggregator_tests;
 // In VABA and async fallback, votes aggregated by round, timeouts/coin_share aggregated by view
 pub struct Aggregator {
     committee: Committee,
-    hs_votes_aggregators: HashMap<SeqNumber, Box<QCMaker>>,
+    hs_votes_aggregators: HashMap<(SeqNumber, Digest), Box<QCMaker>>,
     fallback_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
     spb_votes_aggregators: HashMap<(SeqNumber, SeqNumber, u8), Box<ProofMaker>>,
     pre_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<ProofMaker>>,
@@ -40,7 +40,7 @@ impl Aggregator {
 
         // Add the new vote to our aggregator and see if we have a QC.
         self.hs_votes_aggregators
-            .entry(vote.height)
+            .entry((vote.height, vote.hash.clone()))
             .or_insert_with(|| Box::new(QCMaker::new()))
             .append(vote, &self.committee)
     }
@@ -87,7 +87,7 @@ impl Aggregator {
 
     // used in HotStuff
     pub fn cleanup_hs_vote(&mut self, height: &SeqNumber) {
-        self.hs_votes_aggregators.retain(|k, _| k > height);
+        self.hs_votes_aggregators.retain(|(k, _), _| k > height);
     }
 
     pub fn cleanup_spb_vote(&mut self, height: &SeqNumber) {

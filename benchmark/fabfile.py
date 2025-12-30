@@ -12,24 +12,24 @@ from aws.remote import Bench, BenchError
 def local(ctx):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'nodes': 7,
+        'nodes': 4,
         'rate': 10_000,
         'tx_size': 512,
-        'faults': 2,
+        'faults': 0,
         'duration': 10,
     }
     node_params = {
         'consensus': {
             'node_sync_time': 500,
-            'timeout_delay': 10,
+            'timeout_delay': 20,
             'sync_retry_delay': 10_000,
             'max_payload_size': 1_000,
             'min_block_delay': 0,
             'network_delay': 10_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
-            'random_ddos': False,
-            'random_ddos_chance': 0,
-            'fallback_length': 1,
+            'random_ddos': True,
+            'random_ddos_chance': 10,
+            'fallback_length': 2,
             'exp': 0, # verification switch
             'leader_window': 3
         },
@@ -39,7 +39,7 @@ def local(ctx):
             'max_payload_size': 500_000,
             'min_block_delay': 0
         },
-        'protocol': 1, # 0 for 2-chain HotStuff, 1 for ParBFT, 2 for SMVBA
+        'protocol': 1, # 0 for 2-chain HotStuff, 1 for Gnosis, 2 for SMVBA
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug=True).result()
@@ -108,19 +108,19 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [16],
-        'rate': [80_000, 14_000],
-        'tx_size': 512,
+        'rate': [50_000, 10_000, 15_000],
+        'tx_size': 16,
         'faults': 0, 
-        'duration': 20,
+        'duration': 100,
         'runs': 1,
     }
     node_params = {
         'consensus': {
-            'node_sync_time': 10_000,
-            'timeout_delay': 5_000,
+            'node_sync_time': 60_000,
+            'timeout_delay': 300,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
-            'min_block_delay': 100,
+            'min_block_delay': 0,
             'network_delay': 20_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
             'random_ddos': False,
@@ -132,7 +132,7 @@ def remote(ctx):
         'mempool': {
             'queue_capacity': 100_000,
             'sync_retry_delay': 100_000,
-            'max_payload_size': 500_000,
+            'max_payload_size': 15_625,
             'min_block_delay': 100
         },
         'protocol': 1, # 0 for 2-chain HotStuff, 1 for Ditto, 2 for 2-chain VABA

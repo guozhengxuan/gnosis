@@ -408,6 +408,11 @@ impl Core {
     /***********************two-chain hotstuff*************************/
 
     async fn opt_propose(&mut self) -> ConsensusResult<()> {
+        let self_leader_idx = self.leader_elector.index_as_leader(self.name, self.height).unwrap();
+        if self_leader_idx > 0 {
+            info!("{}-th leader of height: {} epoch: {} timeouts", self_leader_idx-1, self.height, self.epoch);
+        }
+
         // Generate a new block and broadcast it.
         let block = self
             .generate_proposal(self.height, 0, Some(self.high_qc.clone()), OPT)
@@ -517,10 +522,9 @@ impl Core {
             )
             .await?;
         }
-        //2. 在完全乐观情况下 延迟启动
-        if self.is_optmistic() && self.pes_path {
-            self.fallback_propose(block.height, Some(block.qc.clone()))
-                .await?;
+
+        if self.pes_path && !self.smvba_is_invoke.contains_key(&block.height) {
+            self.invoke_fallback(block.height, Some(block.qc.clone())).await?;
         }
 
         // The chain should have consecutive round numbers by construction.
@@ -556,35 +560,22 @@ impl Core {
         if let Some(vote) = self.make_opt_vote(block).await {
             debug!("Created hs {:?}", vote);
             let message = ConsensusMessage::HSVote(vote.clone());
-            if self.is_optmistic() {
-                // Send vote to all leaders of the next height.
-                let leaders = self.leader_elector.get_leaders(self.height + 1);
-                for leader in leaders.iter() {
-                    if self.name != *leader {
-                        Synchronizer::transmit(
-                            message.clone(),
-                            &self.name,
-                            Some(leader),
-                            &self.network_filter,
-                            &self.committee,
-                            OPT,
-                        ).await?;
-                    }
+            // Send vote to all leaders of the next height.
+            let leaders = self.leader_elector.get_leaders(self.height + 1);
+            for leader in leaders.iter() {
+                if self.name != *leader {
+                    Synchronizer::transmit(
+                        message.clone(),
+                        &self.name,
+                        Some(leader),
+                        &self.network_filter,
+                        &self.committee,
+                        OPT,
+                    ).await?;
                 }
-                // If the node is one of the leaders of next height, handle its own vote.
-                if self.leader_elector.index_as_leader(self.name, self.height + 1).is_some() {
-                    self.handle_opt_vote(&vote).await?;
-                }
-            } else {
-                Synchronizer::transmit(
-                    message,
-                    &self.name,
-                    None,
-                    &self.network_filter,
-                    &self.committee,
-                    OPT,
-                )
-                .await?;
+            }
+            // If the node is one of the leaders of next height, handle its own vote.
+            if self.leader_elector.index_as_leader(self.name, self.height + 1).is_some() {
                 self.handle_opt_vote(&vote).await?;
             }
         }
@@ -638,12 +629,6 @@ impl Core {
             // Initialize the timer. 
             // The i-th leader waits for (i * delta) time before proposing.
             self.timer.reset(Some(leader_idx.unwrap() as u64 * self.parameters.timeout_delay));
-
-            // ???
-            if self.pes_path && !self.is_optmistic() {
-                self.fallback_propose(self.height, Some(self.high_qc.clone()))
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -662,7 +647,7 @@ impl Core {
         true
     }
 
-    async fn fallback_propose(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
+    async fn invoke_fallback(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
         let block = self.generate_proposal(height, 1, qc, PES).await;
         self.broadcast_fallback_propose(block).await?;
         Ok(())
@@ -854,66 +839,30 @@ impl Core {
                 }
                 opt_set.insert(prepare.author, prepare.signature.clone());
 
-                //如果没有广播过 0
-                if !self.prepare_tag.contains_key(&prepare.height) {
-                    let temp = PrePare::new(
-                        self.name,
-                        self.epoch,
-                        prepare.height,
-                        prepare.qc.clone(),
-                        OPT,
-                        self.signature_service.clone(),
-                    ).await;
+                if opt_set.len() as u32 == self.committee.quorum_threshold() {
+                    // Fast commit path.
+                    if let Some(bytes) = self.store.read(prepare.qc.hash.to_vec()).await? {
+                        let block: Block = bincode::deserialize(&bytes)?;
+                        if block.height > self.last_committed_height {
+                            self.commit(&block).await?;
 
-                    self.prepare_tag.insert(prepare.height, temp.clone());
-                    opt_set.insert(temp.author, temp.signature.clone());
+                            self.last_committed_height = block.height;
 
-                    let message = ConsensusMessage::ParPrePare(temp);
-                    Synchronizer::transmit(
-                        message,
-                        &self.name,
-                        None,
-                        &self.network_filter_smvba,
-                        &self.committee,
-                        PES,
-                    )
-                    .await?;
-                }
+                            debug!("Committed from fast path {:?}", block);
 
-                match opt_set.len() as u32 {
-                    len if len == self.committee.random_coin_threshold() => {
-                        //启动smvba
-                        let signatures = opt_set
-                            .into_iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-
-                        self.invoke_smvba(prepare.height, OPT, signatures, Some(prepare.qc.clone()))
-                            .await?;
-                    }
-                    len if len == self.committee.quorum_threshold() => {
-                        // Fast commit path.
-                        if let Some(bytes) = self.store.read(prepare.qc.hash.to_vec()).await? {
-                            let block: Block = bincode::deserialize(&bytes)?;
-                            if block.height > self.last_committed_height {
-                                self.commit(&block).await?;
-
-                                self.last_committed_height = block.height;
-
-                                debug!("Committed from fast path {:?}", block);
-
-                                if let Err(e) = self.commit_channel.send(block).await {
-                                    warn!("Failed to send block through the commit channel: {}", e);
-                                }
+                            if let Err(e) = self.commit_channel.send(block).await {
+                                warn!("Failed to send block through the commit channel: {}", e);
                             }
                         }
-                        // Terminate the last sMVBA instance.
-                        if self.pes_path && prepare.height >= 2 {
-                            self.terminate_smvba(prepare.height - 1)?;
-                        }
                     }
-                    _ => {}
+                    // Terminate the last sMVBA instance.
+                    if self.pes_path && prepare.height >= 2 {
+                        self.terminate_smvba(prepare.height - 1)?;
+                    }
                 }
+
+                self.invoke_smvba(prepare.height, OPT, Vec::new(), Some(prepare.qc))
+                    .await?;
             }
             PES => {
                 if pes_set.contains_key(&prepare.author) {
@@ -1009,15 +958,15 @@ impl Core {
         self.smvba_is_invoke.insert(height, true);
         let block;
         if val == OPT {
-            block = Block::default();
+            block = self
+                .generate_proposal(height, 0, qc, OPT)
+                .await;
         } else {
             block = self
                 .generate_proposal(height, self.fallback_length + 1, qc, PES)
                 .await;
         }
-        // let block = self
-        //     .generate_proposal(height, self.fallback_length + 1, qc, PES)
-        //     .await;
+
         let round = self.smvba_current_round.entry(height).or_insert(1).clone();
         let value = SPBValue::new(block, round, INIT_PHASE, val, signatures);
         let proof = SPBProof {
@@ -1732,7 +1681,7 @@ impl Core {
             // self.invoke_smvba(self.height, OPT, Vec::new(), None)
             //     .await
             //     .expect("Failed to send the first PES block");
-            self.fallback_propose(self.height, Some(self.high_qc.clone()))
+            self.invoke_fallback(self.height, Some(self.high_qc.clone()))
                 .await
                 .expect("Failed to send the first PES block");
         }
