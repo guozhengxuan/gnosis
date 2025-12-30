@@ -146,13 +146,25 @@ class InstanceManager:
     def _get_ami(self, client):
         # The AMI changes with regions.
         response = client.describe_images(
-            Filters=[{
-                'Name': 'description',
-                'Values': ['Canonical, Ubuntu, 20.04 LTS, amd64 focal image *']
-            }]
+            Owners=['099720109477'],  # Canonical's AWS account ID
+            Filters=[
+                {
+                    'Name': 'name',
+                    'Values': ['ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*']
+                },
+                {
+                    'Name': 'state',
+                    'Values': ['available']
+                }
+            ]
         )
-        # print(response)
-        return response['Images'][0]['ImageId']
+
+        if not response['Images']:
+            raise Exception(f"No Ubuntu 20.04 AMI found in region {client.meta.region_name}")
+
+        # Sort by creation date and get the most recent one
+        images = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)
+        return images[0]['ImageId']
 
     def create_instances(self, instances):
         assert isinstance(instances, list)
@@ -175,34 +187,40 @@ class InstanceManager:
                 self.clients.values(), prefix=f'Creating {size} instances'
             )
             for i,client in enumerate(progress):
-                client.run_instances(
-                    ImageId=self._get_ami(client),
-                    InstanceType=self.settings.instance_type,
-                    KeyName=self.settings.key_name,
-                    MaxCount=instances[i],
-                    MinCount=instances[i],
-                    SecurityGroups=[self.SECURITY_GROUP_NAME],
-                    TagSpecifications=[{
-                        'ResourceType': 'instance',
-                        'Tags': [{
-                            'Key': 'Name',
-                            'Value': self.INSTANCE_NAME
-                        }]
-                    }],
-                    EbsOptimized=True,
-                    BlockDeviceMappings=[{
-                        'DeviceName': '/dev/sda1',
-                        'Ebs': {
-                            'VolumeType': 'gp2',
-                            'VolumeSize': 200,
-                            'DeleteOnTermination': True
-                        }
-                    }],
-                )
+                try:
+                    client.run_instances(
+                        ImageId=self._get_ami(client),
+                        InstanceType=self.settings.instance_type,
+                        KeyName=self.settings.key_name,
+                        MaxCount=instances[i],
+                        MinCount=instances[i],
+                        SecurityGroups=[self.SECURITY_GROUP_NAME],
+                        TagSpecifications=[{
+                            'ResourceType': 'instance',
+                            'Tags': [{
+                                'Key': 'Name',
+                                'Value': self.INSTANCE_NAME
+                            }]
+                        }],
+                        EbsOptimized=True,
+                        BlockDeviceMappings=[{
+                            'DeviceName': '/dev/sda1',
+                            'Ebs': {
+                                'VolumeType': 'gp2',
+                                'VolumeSize': 200,
+                                'DeleteOnTermination': True
+                            }
+                        }],
+                    )
+                except ClientError as e:
+                    error = AWSError(e)
+                    raise BenchError(f'Failed to create instances in region {client.meta.region_name}', error)
             # Wait for the instances to boot.
             Print.info('Waiting for all instances to boot...')
             self._wait(['pending'])
             Print.heading(f'Successfully created {size} new instances')
+        except BenchError:
+            raise
         except ClientError as e:
             raise BenchError('Failed to create AWS instances', AWSError(e))
 

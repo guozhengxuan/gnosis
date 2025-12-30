@@ -8,6 +8,7 @@ from time import sleep
 from math import ceil
 from os.path import join
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from benchmark.config import Committee, Key, TSSKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
@@ -181,14 +182,26 @@ class Bench:
         g = Group(*hosts, user='ubuntu', connect_kwargs=self.connect)
         g.run(cmd, hide=True)
 
-        # Upload configuration files.
-        progress = progress_bar(hosts, prefix='Uploading config files:')
-        for i, host in enumerate(progress):
+        # Upload configuration files in parallel.
+        def upload_to_host(i, host):
             c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
             c.put(PathMaker.committee_file(), '.')
             c.put(PathMaker.key_file(i), '.')
             c.put(PathMaker.threshold_key_file(i), '.')
             c.put(PathMaker.parameters_file(), '.')
+            return i
+
+        Print.info('Uploading config files...')
+        with ThreadPoolExecutor(max_workers=min(len(hosts), 16)) as executor:
+            futures = {executor.submit(upload_to_host, i, host): i for i, host in enumerate(hosts)}
+            completed = 0
+            total = len(hosts)
+            for future in as_completed(futures):
+                completed += 1
+                future.result()  # Raise exception if any occurred
+                percent = (completed / total) * 100
+                print(f'\rUploading config files: {"█" * int(percent / 4)}{"-" * (25 - int(percent / 4))}| {percent:.1f}%', end='', flush=True)
+            print()  # New line after progress bar
 
         return committee
 
@@ -247,26 +260,36 @@ class Bench:
         # Wait for all transactions to be processed.
         duration = bench_parameters.duration
         for _ in progress_bar(range(100), prefix=f'Running benchmark ({duration} sec):'):
-            sleep(ceil(duration / 100))
+            sleep(duration / 100)
         self.kill(hosts=hosts, delete_logs=False)
 
-    def _logs(self, hosts, faults, protocol, ddos):
+    def _logs(self, hosts, faults, protocol, ddos, leader_window=3):
         # Delete local logs (if any).
         cmd = CommandMaker.clean_logs()
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
-        # Download log files.
-        progress = progress_bar(hosts, prefix='Downloading logs:')
-        for i, host in enumerate(progress):
+        # Download log files in parallel.
+        def download_from_host(i, host):
             c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
             c.get(PathMaker.node_log_file(i), local=PathMaker.node_log_file(i))
-            c.get(
-                PathMaker.client_log_file(i), local=PathMaker.client_log_file(i)
-            )
+            c.get(PathMaker.client_log_file(i), local=PathMaker.client_log_file(i))
+            return i
+
+        Print.info('Downloading logs...')
+        with ThreadPoolExecutor(max_workers=min(len(hosts), 16)) as executor:
+            futures = {executor.submit(download_from_host, i, host): i for i, host in enumerate(hosts)}
+            completed = 0
+            total = len(hosts)
+            for future in as_completed(futures):
+                completed += 1
+                future.result()  # Raise exception if any occurred
+                percent = (completed / total) * 100
+                print(f'\rDownloading logs: {"█" * int(percent / 4)}{"-" * (25 - int(percent / 4))}| {percent:.1f}%', end='', flush=True)
+            print()  # New line after progress bar
 
         # Parse logs and return the parser.
         Print.info('Parsing logs and computing performance...')
-        return LogParser.process(PathMaker.logs_path(), faults=faults, protocol=protocol, ddos=ddos)
+        return LogParser.process(PathMaker.logs_path(), faults=faults, protocol=protocol, ddos=ddos, leader_window=leader_window)
 
     def run(self, bench_parameters_dict, node_parameters_dict, debug=False):
         assert isinstance(debug, bool)
@@ -332,6 +355,7 @@ class Bench:
 
                 protocol = node_parameters.protocol
                 ddos = node_parameters.ddos
+                leader_window = node_parameters.leader_window
 
                 # Run the benchmark.
                 for i in range(bench_parameters.runs):
@@ -340,7 +364,7 @@ class Bench:
                         self._run_single(
                             hosts, r, bench_parameters, node_parameters, debug
                         )
-                        self._logs(hosts, faults, protocol, ddos).print(
+                        self._logs(hosts, faults, protocol, ddos, leader_window).print(
                             PathMaker.result_file(n, r, bench_parameters.tx_size, faults),
                             PathMaker.txs_file(n, r, bench_parameters.tx_size, faults),
                             PathMaker.latency_file(n,r,bench_parameters.tx_size,faults)

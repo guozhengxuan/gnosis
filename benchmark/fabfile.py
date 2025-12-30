@@ -21,7 +21,7 @@ def local(ctx):
     node_params = {
         'consensus': {
             'node_sync_time': 500,
-            'timeout_delay': 1_000,
+            'timeout_delay': 10,
             'sync_retry_delay': 10_000,
             'max_payload_size': 1_000,
             'min_block_delay': 0,
@@ -108,25 +108,26 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [16],
-        'rate': [80_000,70_000,60_000,50_000],
+        'rate': [80_000, 14_000],
         'tx_size': 512,
         'faults': 0, 
-        'duration': 200,
+        'duration': 20,
         'runs': 1,
     }
     node_params = {
         'consensus': {
-            'node_sync_time': 60_000,
+            'node_sync_time': 10_000,
             'timeout_delay': 5_000,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
-            'min_block_delay': 100, 
+            'min_block_delay': 100,
             'network_delay': 20_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
             'random_ddos': False,
             'random_ddos_chance': 20,
             'fallback_length': 2,
-            'exp': 1 # multiplicative factor for exponential fallback
+            'exp': 1, # multiplicative factor for exponential fallback
+            'leader_window': 3
         },
         'mempool': {
             'queue_capacity': 100_000,

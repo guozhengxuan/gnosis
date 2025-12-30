@@ -114,6 +114,7 @@ class NodeParameters:
             inputs += [json['consensus']['random_ddos_chance']]
             inputs += [json['consensus']['fallback_length']]
             inputs += [json['consensus']['exp']]
+            inputs += [json['consensus']['leader_window']]
             inputs += [json['mempool']['queue_capacity']]
             inputs += [json['consensus']['sync_retry_delay']]
             inputs += [json['mempool']['max_payload_size']]
@@ -124,11 +125,12 @@ class NodeParameters:
 
         if not all(isinstance(x, int) for x in inputs):
             raise ConfigError('Invalid parameters type')
-        
+
         self.node_sync_time = json['consensus']['node_sync_time']
-        self.timeout_delay = json['consensus']['timeout_delay'] 
-        self.network_delay = json['consensus']['network_delay'] 
+        self.timeout_delay = json['consensus']['timeout_delay']
+        self.network_delay = json['consensus']['network_delay']
         self.ddos = json['consensus']['ddos']
+        self.leader_window = json['consensus']['leader_window']
         self.protocol = json['protocol']
         self.json = json
 
