@@ -107,15 +107,15 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [16],
-        'rate': [80_000,70_000,60_000,50_000],
+        'rate': [150_000],
         'tx_size': 512,
         'faults': 0, 
-        'duration': 200,
+        'duration': 30,
         'runs': 1,
     }
     node_params = {
         'consensus': {
-            'node_sync_time': 60_000,
+            'node_sync_time': 60,
             'timeout_delay': 5_000,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
