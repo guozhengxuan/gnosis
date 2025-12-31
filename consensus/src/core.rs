@@ -524,7 +524,7 @@ impl Core {
             .await?;
         }
 
-        if self.pes_path {
+        if self.is_optmistic() && self.pes_path {
             self.invoke_fallback(block.height, Some(block.qc.clone())).await?;
         }
 
@@ -561,22 +561,36 @@ impl Core {
         if let Some(vote) = self.make_opt_vote(block).await {
             debug!("Created hs {:?}", vote);
             let message = ConsensusMessage::HSVote(vote.clone());
-            // Send vote to all leaders of the next height.
-            let leaders = self.leader_elector.get_leaders(self.height + 1);
-            for leader in leaders.iter() {
-                if self.name != *leader {
-                    Synchronizer::transmit(
-                        message.clone(),
-                        &self.name,
-                        Some(leader),
-                        &self.network_filter,
-                        &self.committee,
-                        OPT,
-                    ).await?;
+            if self.is_optmistic() 
+            {
+                // Send vote to all leaders of the next height.
+                let leaders = self.leader_elector.get_leaders(self.height + 1);
+                for leader in leaders.iter() {
+                    if self.name != *leader {
+                        Synchronizer::transmit(
+                            message.clone(),
+                            &self.name,
+                            Some(leader),
+                            &self.network_filter,
+                            &self.committee,
+                            OPT,
+                        ).await?;
+                    }
                 }
-            }
-            // If the node is one of the leaders of next height, handle its own vote.
-            if self.leader_elector.index_as_leader(self.name, self.height + 1).is_some() {
+                // If the node is one of the leaders of next height, handle its own vote.
+                if self.leader_elector.index_as_leader(self.name, self.height + 1).is_some() {
+                    self.handle_opt_vote(&vote).await?;
+                }
+            } else {
+                Synchronizer::transmit(
+                    message,
+                    &self.name,
+                    None,
+                    &self.network_filter,
+                    &self.committee,
+                    OPT,
+                )
+                .await?;
                 self.handle_opt_vote(&vote).await?;
             }
         }
@@ -609,7 +623,7 @@ impl Core {
 
         let leader_idx= self.leader_elector.index_as_leader(self.name, vote.height+1);
         ensure!(
-            leader_idx.is_some(),
+            !self.is_optmistic() || leader_idx.is_some(),
             ConsensusError::WrongVoteRecipient {
                 digest: vote.digest(),
                 name: vote.author,
@@ -629,12 +643,18 @@ impl Core {
 
             // Initialize the timer.
             // The i-th leader waits for (i * delta) time before proposing.
-            let leader_idx_val = leader_idx.unwrap();
-            if leader_idx_val == 0 {
-                // 0-th leader proposes immediately to avoid event loop starvation
-                self.opt_propose().await?;
-            } else {
-                self.timer.reset(Some(leader_idx_val as u64 * self.parameters.timeout_delay));
+            if let Some(leader_idx_val) = leader_idx {
+                if leader_idx_val == 0 {
+                    // 0-th leader proposes immediately to avoid event loop starvation
+                    self.opt_propose().await?;
+                } else {
+                    self.timer.reset(Some(leader_idx_val as u64 * self.parameters.timeout_delay));
+                }
+            }
+
+            if self.pes_path && !self.is_optmistic() {
+                self.invoke_fallback(self.height, Some(self.high_qc.clone()))
+                    .await?;
             }
         }
         Ok(())

@@ -12,7 +12,7 @@
     "repo": {
         "name": "ipotane",
         "url": "https://github.com/guozhengxuan/ipotane",
-        "branch": "main"
+        "branch": "gnosis"
     },
     "instances": {
         "type": "m5d.xlarge",
