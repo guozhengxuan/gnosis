@@ -1068,51 +1068,6 @@ pub struct RandomCoin {
     pub shares: Vec<RandomnessShare>,
 }
 
-impl RandomCoin {
-    // pub fn verify(&self, committee: &Committee, pk_set: &PublicKeySet) -> ConsensusResult<()> {
-    //     // Ensure the QC has a quorum.
-    //     let mut weight = 0;
-    //     let mut used = HashSet::new();
-    //     for share in self.shares.iter() {
-    //         let name = share.author;
-    //         ensure!(
-    //             !used.contains(&name),
-    //             ConsensusError::AuthorityReuseinCoin(name)
-    //         );
-    //         let voting_rights = committee.stake(&name);
-    //         ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(name));
-    //         used.insert(name);
-    //         weight += voting_rights;
-    //     }
-    //     ensure!(
-    //         weight >= committee.random_coin_threshold(), //f+1
-    //         ConsensusError::RandomCoinRequiresQuorum
-    //     );
-
-    //     let mut sigs = BTreeMap::new(); //构建BTree选择leader
-    //                                     // Check the random shares.
-    //     for share in &self.shares {
-    //         share.verify(committee, pk_set)?;
-    //         sigs.insert(committee.id(share.author), share.signature_share.clone());
-    //     }
-    //     if let Ok(sig) = pk_set.combine_signatures(sigs.iter()) {
-    //         let id = usize::from_be_bytes((&sig.to_bytes()[0..8]).try_into().unwrap())
-    //             % committee.size();
-    //         let mut keys: Vec<_> = committee.authorities.keys().cloned().collect();
-    //         keys.sort();
-    //         let leader = keys[id];
-    //         ensure!(
-    //             leader == self.leader,
-    //             ConsensusError::RandomCoinWithWrongLeader
-    //         );
-    //     } else {
-    //         ensure!(true, ConsensusError::RandomCoinWithWrongShares);
-    //     }
-
-    //     Ok(())
-    // }
-}
-
 impl fmt::Debug for RandomCoin {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(

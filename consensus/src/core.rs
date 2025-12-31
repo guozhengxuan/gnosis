@@ -365,7 +365,6 @@ impl Core {
                 // Cleanup the mempool.
                 self.mempool_driver.cleanup_par(&current_block).await;
             }
-            debug!("Committed {}", current_block);
             let parent = match self.synchronizer.get_parent_block(&current_block).await? {
                 Some(b) => b,
                 None => {
@@ -969,11 +968,13 @@ impl Core {
             return Ok(());
         }
         self.smvba_is_invoke.insert(height, true);
-        let block;
+
+        let mut block;
         if val == OPT {
-            block = self
-                .generate_proposal(height, 0, qc, OPT)
-                .await;
+            block = Block::default();
+            block.author = self.name;
+            block.epoch = self.epoch;
+            block.height = height;
         } else {
             block = self
                 .generate_proposal(height, self.fallback_length + 1, qc, PES)
@@ -1005,15 +1006,6 @@ impl Core {
         if self.height >= height + 2 {
             return false;
         }
-        // let cur_round = self.smvba_current_round.entry(height).or_insert(1);
-        // if *cur_round > round {
-        //     return false;
-        // }
-
-        // halt?
-        // if *self.smvba_halt_falg.entry(height).or_insert(false) {
-        //     return false;
-        // }
 
         true
     }
@@ -1597,9 +1589,9 @@ impl Core {
 
         self.smvba_halt_falg.insert(halt.height, true);
 
-        if halt.value.val == OPT {
-            return Ok(());
-        }
+        // if halt.value.val == OPT {
+        //     return Ok(());
+        // }
 
         let block = halt.value.block;
         // Let's see if we have the block's data. If we don't, the mempool
@@ -1622,6 +1614,13 @@ impl Core {
             return Ok(());
         }
 
+        if block.tag == OPT {
+            // Invoke fallback propose at block.height + 1, if not yet.
+            self.invoke_fallback(block.height + 1, None).await?;
+            
+            return  Ok(());
+        }
+
         self.store_block(block).await;
 
         if block.height > self.last_committed_height {
@@ -1635,12 +1634,13 @@ impl Core {
                 warn!("Failed to send block through the commit channel: {}", e);
             }
 
-            info!(
-                "------------BVABA output 1,epoch {} end--------------",
-                self.epoch
-            );
-
-            return Err(ConsensusError::EpochEnd(self.epoch));
+            if block.tag == PES {
+                info!(
+                    "------------BVABA output 1,epoch {} end--------------",
+                    self.epoch
+                );
+                return Err(ConsensusError::EpochEnd(self.epoch));
+            }
         }
 
         self.mempool_driver.cleanup_par(block).await;
