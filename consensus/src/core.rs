@@ -871,6 +871,31 @@ impl Core {
                 }
                 opt_set.insert(prepare.author, prepare.signature.clone());
 
+                //如果没有广播过 0
+                if !self.prepare_tag.contains_key(&prepare.height) {
+                    let temp = PrePare::new(
+                        self.name,
+                        self.epoch,
+                        prepare.height,
+                        prepare.qc.clone(),
+                        OPT,
+                        self.signature_service.clone(),
+                    )
+                    .await;
+                    self.prepare_tag.insert(prepare.height, temp.clone());
+                    opt_set.insert(temp.author, temp.signature.clone());
+                    let message = ConsensusMessage::ParPrePare(temp);
+                    Synchronizer::transmit(
+                        message,
+                        &self.name,
+                        None,
+                        &self.network_filter_smvba,
+                        &self.committee,
+                        PES,
+                    )
+                    .await?;
+                }
+
                 if opt_set.len() as u32 == self.committee.quorum_threshold() {
                     // Fast commit path.
                     if let Some(bytes) = self.store.read(prepare.qc.hash.to_vec()).await? {
@@ -891,10 +916,16 @@ impl Core {
                     if self.pes_path && prepare.height >= 2 {
                         self.terminate_smvba(prepare.height - 1)?;
                     }
-                }
+                } else if opt_set.len() as u32 == self.committee.random_coin_threshold() {
+                    //启动smvba
+                    let signatures = opt_set
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
 
-                self.invoke_smvba(prepare.height, OPT, Vec::new(), Some(prepare.qc))
-                    .await?;
+                    self.invoke_smvba(prepare.height, OPT, signatures, Some(prepare.qc))
+                        .await?;
+                }
             }
             PES => {
                 if pes_set.contains_key(&prepare.author) {
@@ -1609,9 +1640,9 @@ impl Core {
 
         self.smvba_halt_falg.insert(halt.height, true);
 
-        // if halt.value.val == OPT {
-        //     return Ok(());
-        // }
+        if halt.value.val == OPT {
+            return Ok(());
+        }
 
         let block = halt.value.block;
         // Let's see if we have the block's data. If we don't, the mempool
@@ -1634,13 +1665,6 @@ impl Core {
             return Ok(());
         }
 
-        if block.tag == OPT {
-            // Invoke fallback propose at block.height + 1, if not yet.
-            self.invoke_fallback(block.height + 1, None).await?;
-            
-            return  Ok(());
-        }
-
         self.store_block(block).await;
 
         if block.height > self.last_committed_height {
@@ -1654,13 +1678,11 @@ impl Core {
                 warn!("Failed to send block through the commit channel: {}", e);
             }
 
-            if block.tag == PES {
-                info!(
-                    "------------BVABA output 1,epoch {} end--------------",
-                    self.epoch
-                );
-                return Err(ConsensusError::EpochEnd(self.epoch));
-            }
+            info!(
+                "------------BVABA output 1,epoch {} end--------------",
+                self.epoch
+            );
+            return Err(ConsensusError::EpochEnd(self.epoch));
         }
 
         self.mempool_driver.cleanup_par(block).await;
