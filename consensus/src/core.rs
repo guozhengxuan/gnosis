@@ -79,6 +79,7 @@ pub struct Core {
 
     // Fast path.
     height: SeqNumber, // current height
+    opt_block_is_processed: HashMap<SeqNumber, bool>,
     last_voted_height: SeqNumber,
     last_committed_height: SeqNumber,
     high_qc: QC,
@@ -149,6 +150,7 @@ impl Core {
             core_channel,
             smvba_channel,
             height: 1,
+            opt_block_is_processed: HashMap::new(),
             last_voted_height: 0,
             last_committed_height: 0,
             high_qc: QC::genesis(),
@@ -252,10 +254,6 @@ impl Core {
             .await?;
         }
         Ok(())
-    }
-
-    fn is_optmistic(&self) -> bool {
-        return !self.parameters.ddos && !self.parameters.random_ddos;
     }
 
     #[async_recursion]
@@ -522,6 +520,10 @@ impl Core {
 
     #[async_recursion]
     async fn process_opt_block(&mut self, block: &Block) -> ConsensusResult<()> {
+        if *self.opt_block_is_processed.entry(block.height).or_insert(false) {
+            return Ok(());
+        }
+
         debug!("Processing OPT Block {:?}", block);
 
         // Let's see if we have the last three ancestors of the block, that is:
@@ -530,7 +532,10 @@ impl Core {
         // then ensure we process both ancestors in the correct order, and
         // finally make us resume processing this block.
         let (b0, b1) = match self.synchronizer.get_ancestors(block).await? {
-            Some(ancestors) => ancestors,
+            Some(ancestors) => {
+                self.opt_block_is_processed.insert(block.height, true);
+                ancestors
+            },
             None => {
                 debug!("Processing of {} suspended: missing parent", block.digest());
                 return Ok(());
@@ -545,6 +550,7 @@ impl Core {
         consecutive_rounds &= b1.height + 1 == block.height;
         if self.pes_path && consecutive_rounds && block.height > 2
         {
+
             // Input 0 to next DBA.
             self.fallback_height += 1;
             debug!("Moved to fallback height: {}", self.fallback_height);
@@ -568,31 +574,18 @@ impl Core {
         if let Some(vote) = self.make_opt_vote(block).await {
             debug!("Created hs {:?}", vote);
             let message = ConsensusMessage::HSVote(vote.clone());
-            if self.is_optmistic() {
-                let leader = self.leader_elector.get_leader(self.height + 1);
-                if leader != self.name {
-                    Synchronizer::transmit(
-                        message,
-                        &self.name,
-                        Some(&leader),
-                        &self.network_filter,
-                        &self.committee,
-                        OPT,
-                    )
-                    .await?;
-                } else {
-                    self.handle_opt_vote(&vote).await?;
-                }
-            } else {
+            let leader = self.leader_elector.get_leader(self.height + 1);
+            if leader != self.name {
                 Synchronizer::transmit(
                     message,
                     &self.name,
-                    None,
+                    Some(&leader),
                     &self.network_filter,
                     &self.committee,
                     OPT,
                 )
                 .await?;
+            } else {
                 self.handle_opt_vote(&vote).await?;
             }
         }
@@ -778,10 +771,6 @@ impl Core {
             return Ok(());
         }
 
-        if val == PES {
-            debug!("active pes prepare at height: {}", height);
-        }
-
         let prepare = PrePare::new(
             self.name,
             height,
@@ -861,7 +850,10 @@ impl Core {
                                     prepare.height - 1,
                                 );
                                 self.terminate_smvba(prepare.height - 1)?;
-                                self.last_committed_fallback_height = prepare.height - 1;
+                                self.last_committed_fallback_height = max(
+                                    self.last_committed_fallback_height,
+                                    prepare.height - 1
+                                );
                             }
                         }
                     }
@@ -1588,10 +1580,12 @@ impl Core {
         }
 
         // Start fallback proposals for next DBA.
-        debug!("Moved to fallback height: {}", self.fallback_height);
-        self.fallback_height += 1;
+        if self.fallback_height == block.height {
+            self.fallback_height = block.height + 1;
+            debug!("Moved to fallback height: {} after last DBA ends", self.fallback_height);
+        }
 
-        if self.is_optmistic() && self.pes_path {
+        if self.pes_path {
             self.fallback_propose().await?;
         }
 

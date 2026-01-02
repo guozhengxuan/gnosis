@@ -1,7 +1,7 @@
 {
     "key": {
-        "name": "docker-dcz",
-        "path": "/root/.ssh/id_rsa"
+        "name": "gnosis",
+        "path": "/home/gzx/.ssh/AWS"
     },
     "ports": {
         "smvba": 9000,
@@ -11,16 +11,15 @@
     },
     "repo": {
         "name": "ipotane",
-        "url": "https://github.com/CGCL-codes/ipotane",
-        "branch": "main"
+        "url": "https://github.com/guozhengxuan/ipotane",
+        "branch": "g-hotstuff"
     },
     "instances": {
         "type": "m5d.xlarge",
         "regions": [
-            "us-east-1",
+            "us-east-2",
             "eu-north-1",
             "ap-southeast-2",
-            "us-west-1",
             "ap-northeast-1"
         ]
     }

@@ -145,14 +145,30 @@ class InstanceManager:
 
     def _get_ami(self, client):
         # The AMI changes with regions.
+        # Use Canonical's owner ID and filter by name for more reliable results
         response = client.describe_images(
-            Filters=[{
-                'Name': 'description',
-                'Values': ['Canonical, Ubuntu, 20.04 LTS, amd64 focal image *']
-            }]
+            Owners=['099720109477'],  # Canonical's AWS account ID
+            Filters=[
+                {
+                    'Name': 'name',
+                    'Values': ['ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*']
+                },
+                {
+                    'Name': 'state',
+                    'Values': ['available']
+                }
+            ]
         )
-        # print(response)
-        return response['Images'][0]['ImageId']
+
+        if not response['Images']:
+            raise BenchError(
+                f'No Ubuntu 20.04 AMI found in region {client.meta.region_name}. '
+                'The AMI may not be available in this region.'
+            )
+
+        # Sort by creation date to get the latest AMI
+        images = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)
+        return images[0]['ImageId']
 
     def create_instances(self, instances):
         assert isinstance(instances, list)

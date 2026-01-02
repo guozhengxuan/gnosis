@@ -15,7 +15,7 @@ def local(ctx):
         'nodes': 4,
         'rate': 10_000,
         'tx_size': 512,
-        'faults': 1,
+        'faults': 0,
         'duration': 10,
     }
     node_params = {
@@ -25,11 +25,11 @@ def local(ctx):
             'sync_retry_delay': 10_000,
             'max_payload_size': 1_000,
             'min_block_delay': 0,
-            'network_delay': 10_000, # message delay on the leaders' proposals during DDoS
+            'network_delay': 15_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
-            'random_ddos': False,
+            'random_ddos': True,
             'random_ddos_chance': 0,
-            'fallback_length': 3,
+            'fallback_length': 2,
             'exp': 0, # verification switch
         },
         'mempool': {
@@ -38,10 +38,10 @@ def local(ctx):
             'max_payload_size': 500_000,
             'min_block_delay': 0
         },
-        'protocol': 1, # 0 for 2-chain HotStuff, 1 for ParBFT, 2 for SMVBA
+        'protocol': 1, # 0 for 2-chain HotStuff, 1 for Gnosis, 2 for SMVBA
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug=True).result()
+        ret = LocalBench(bench_params, node_params).run(debug=False).result()
         print(ret)
     except BenchError as e:
         Print.error(e)
@@ -107,23 +107,23 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [16],
-        'rate': [80_000,70_000,60_000,50_000],
-        'tx_size': 512,
+        'rate': [40_000],
+        'tx_size': 16,
         'faults': 0, 
-        'duration': 200,
+        'duration': 100,
         'runs': 1,
     }
     node_params = {
         'consensus': {
             'node_sync_time': 60_000,
-            'timeout_delay': 5_000,
+            'timeout_delay': 600,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
             'min_block_delay': 100, 
             'network_delay': 20_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
-            'random_ddos': False,
-            'random_ddos_chance': 20,
+            'random_ddos': True,
+            'random_ddos_chance': 0,
             'fallback_length': 2,
             'exp': 1 # multiplicative factor for exponential fallback
         },
