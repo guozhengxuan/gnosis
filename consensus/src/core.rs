@@ -1609,10 +1609,13 @@ impl Core {
     /******************SMVAB**************************************************************/
 
     pub async fn run(&mut self) {
-        // Upon booting, generate the very first block (if we are the leader).
-        if self.opt_path && self.name == self.leader_elector.get_leader(self.height) {
+        if self.opt_path {
             self.timer.reset();
-            self.opt_propose(None).await.expect("Failed to send the first OPT block");
+
+            // Upon booting, generate the very first block (if we are the leader).
+            if self.name == self.leader_elector.get_leader(self.height) {
+                self.opt_propose(None).await.expect("Failed to send the first OPT block");
+            }
         }
 
         if self.pes_path {
