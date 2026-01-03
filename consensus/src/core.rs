@@ -358,7 +358,7 @@ impl Core {
     }
 
     async fn local_timeout_round(&mut self) -> ConsensusResult<()> {
-        if !self.opt_path {
+        if !self.opt_path || self.height == 1 {
             return Ok(())
         }
 
