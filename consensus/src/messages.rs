@@ -1081,8 +1081,8 @@ impl fmt::Debug for MHalt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "MHalt(author {}, fallback height {} ,round {}, leader {},)",
-            self.author, self.height, self.round, self.leader
+            "MHalt(author {}, fallback height {} ,round {}, leader {}, tag {})",
+            self.author, self.height, self.round, self.leader, self.value.val
         )
     }
 }

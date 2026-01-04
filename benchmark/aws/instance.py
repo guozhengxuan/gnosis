@@ -2,6 +2,7 @@ import boto3
 from botocore.exceptions import ClientError
 from collections import defaultdict, OrderedDict
 from time import sleep
+import subprocess
 
 from benchmark.utils import Print, BenchError, progress_bar
 from aws.settings import Settings, SettingsError
@@ -65,6 +66,62 @@ class InstanceManager:
             ids, _ = self._get(state)
             if sum(len(x) for x in ids.values()) == 0:
                 break
+
+    def _wait_for_ssh(self, timeout=300):
+        """Wait for SSH to become available on all running instances.
+
+        Args:
+            timeout: Maximum time to wait in seconds (default: 300)
+        """
+        import time
+        Print.info('Waiting for SSH to become available on all instances...')
+        start_time = time.time()
+
+        while True:
+            _, ips = self._get(['running'])
+            all_hosts = [x for y in ips.values() for x in y]
+
+            if not all_hosts:
+                Print.warn('No running instances found')
+                return
+
+            # Test SSH connectivity to all hosts
+            unreachable = []
+            for host in all_hosts:
+                try:
+                    result = subprocess.run(
+                        ['ssh', '-i', self.settings.key_path,
+                         '-o', 'ConnectTimeout=5',
+                         '-o', 'StrictHostKeyChecking=no',
+                         '-o', 'BatchMode=yes',
+                         '-o', 'UserKnownHostsFile=/dev/null',
+                         f'ubuntu@{host}',
+                         'exit'],
+                        capture_output=True,
+                        timeout=10
+                    )
+                    if result.returncode != 0:
+                        unreachable.append(host)
+                except (subprocess.TimeoutExpired, Exception):
+                    unreachable.append(host)
+
+            if not unreachable:
+                Print.info(f'All {len(all_hosts)} instances are now SSH accessible')
+                break
+
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise BenchError(
+                    f'Timeout waiting for SSH: {len(unreachable)}/{len(all_hosts)} '
+                    f'instances still unreachable after {timeout}s',
+                    TimeoutError(f'Unreachable instances: {unreachable}')
+                )
+
+            Print.info(
+                f'Waiting for SSH... ({len(all_hosts) - len(unreachable)}/{len(all_hosts)} ready, '
+                f'{int(elapsed)}s elapsed)'
+            )
+            sleep(10)
 
     def _create_security_group(self, client):
         client.create_security_group(
@@ -202,6 +259,10 @@ class InstanceManager:
             # Wait for the instances to boot.
             Print.info('Waiting for all instances to boot...')
             self._wait(['pending'])
+
+            # Wait for SSH to become available
+            self._wait_for_ssh(timeout=300)
+
             Print.heading(f'Successfully created {size} new instances')
         except ClientError as e:
             raise BenchError('Failed to create AWS instances', AWSError(e))
