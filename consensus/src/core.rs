@@ -284,6 +284,40 @@ impl Core {
         block
     }
 
+    async fn commit_one(&mut self, block: &Block) -> ConsensusResult<()> {
+        if !block.payload.is_empty() {
+            info!(
+                "Committed {} round {} tag {}",
+                block, block.round, block.tag
+            );
+
+            #[cfg(feature = "benchmark")]
+            for x in &block.payload {
+                info!(
+                    "Committed B{}({}) round {} tag {}",
+                    block.height,
+                    base64::encode(x),
+                    block.round,
+                    block.tag
+                );
+            }
+            // Cleanup the mempool.
+            self.mempool_driver.cleanup_par(&block).await;
+        }
+
+        // Update last committed.
+        if block.tag == OPT {
+            self.last_committed_height = max(self.last_committed_height, block.height);
+        } else {
+            self.last_committed_fallback_height = max(
+                self.last_committed_fallback_height, 
+                block.height
+            );
+        }
+
+        Ok(())
+    }
+
     async fn commit(&mut self, block: &Block) -> ConsensusResult<()> {
         let mut current = block.clone();
 
@@ -291,25 +325,7 @@ impl Core {
         while current.tag == PES && current.height > self.last_committed_fallback_height ||
             current.tag == OPT && current.height > self.last_committed_height
         {
-            if !current.payload.is_empty() {
-                info!(
-                    "Committed {} round {} tag {}",
-                    current, current.round, current.tag
-                );
-
-                #[cfg(feature = "benchmark")]
-                for x in &current.payload {
-                    info!(
-                        "Committed B{}({}) round {} tag {}",
-                        current.height,
-                        base64::encode(x),
-                        current.round,
-                        current.tag
-                    );
-                }
-                // Cleanup the mempool.
-                self.mempool_driver.cleanup_par(&current).await;
-            }
+            self.commit_one(&current).await?;
             debug!("Committed {}", current);
             let parent = match self.synchronizer.get_parent_block(&current).await? {
                 Some(b) => b,
@@ -322,15 +338,6 @@ impl Core {
                 }
             };
             current = parent;
-        }
-
-        if block.tag == OPT {
-            self.last_committed_height = max(self.last_committed_height, block.height);
-        } else {
-            self.last_committed_fallback_height = max(
-                self.last_committed_fallback_height, 
-                block.height
-            );
         }
 
         Ok(())
@@ -814,7 +821,7 @@ impl Core {
                         {
                             // Fast commit the opt block.
                             let b0: Block = bincode::deserialize(&bytes)?;
-                            self.commit(&b0).await?;
+                            self.commit_one(&b0).await?;
                             if let Err(e) = self.commit_channel.send(b0).await {
                                 warn!("Failed to send block through the commit channel: {}", e);
                             }
@@ -1573,7 +1580,10 @@ impl Core {
         }
 
         if self.pes_path {
-            self.fallback_propose(1).await.expect("Failed to send the first PES block");
+            // self.fallback_propose(1).await.expect("Failed to send the first PES block");
+            self.active_prepare_phase(0, HSProof::OPTProof((QC::genesis(), QC::genesis())), OPT)
+                .await
+                .expect("Failed to send the OPT vote to pes path at height 0");
         }
 
         // This is the main loop: it processes incoming blocks and votes,
