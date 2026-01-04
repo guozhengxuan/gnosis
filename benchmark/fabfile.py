@@ -16,7 +16,7 @@ def local(ctx):
         'rate': 10_000,
         'tx_size': 512,
         'faults': 0,
-        'duration': 10,
+        'duration': 20,
     }
     node_params = {
         'consensus': {
@@ -29,7 +29,7 @@ def local(ctx):
             'ddos': False, # True for DDoS attack on the leader, False otherwise
             'random_ddos': True,
             'random_ddos_chance': 0,
-            'fallback_length': 2,
+            'fallback_length': 3,
             'exp': 0, # verification switch
         },
         'mempool': {
@@ -107,30 +107,30 @@ def remote(ctx):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'nodes': [16],
-        'rate': [40_000],
+        'rate': [100_000],
         'tx_size': 16,
         'faults': 0, 
-        'duration': 100,
+        'duration': 60,
         'runs': 1,
     }
     node_params = {
         'consensus': {
-            'node_sync_time': 60_000,
+            'node_sync_time': 30_000,
             'timeout_delay': 600,
             'sync_retry_delay': 100_000,
             'max_payload_size': 1_000,
-            'min_block_delay': 100, 
+            'min_block_delay': 0, 
             'network_delay': 20_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
             'random_ddos': True,
-            'random_ddos_chance': 0,
+            'random_ddos_chance': 20,
             'fallback_length': 2,
-            'exp': 1 # multiplicative factor for exponential fallback
+            'exp': 0 # multiplicative factor for exponential fallback
         },
         'mempool': {
             'queue_capacity': 100_000,
             'sync_retry_delay': 100_000,
-            'max_payload_size': 500_000,
+            'max_payload_size': 15_625,
             'min_block_delay': 100
         },
         'protocol': 1, # 0 for 2-chain HotStuff, 1 for Ditto, 2 for 2-chain VABA

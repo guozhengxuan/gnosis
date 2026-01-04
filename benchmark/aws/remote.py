@@ -8,6 +8,7 @@ from time import sleep
 from math import ceil
 from os.path import join
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from benchmark.config import Committee, Key, TSSKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
@@ -181,14 +182,29 @@ class Bench:
         g = Group(*hosts, user='ubuntu', connect_kwargs=self.connect)
         g.run(cmd, hide=True)
 
-        # Upload configuration files.
-        progress = progress_bar(hosts, prefix='Uploading config files:')
-        for i, host in enumerate(progress):
+        # Upload configuration files in parallel.
+        Print.info(f'Uploading config files to {len(hosts)} hosts in parallel...')
+
+        def upload_to_host(host_index_pair):
+            i, host = host_index_pair
             c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
             c.put(PathMaker.committee_file(), '.')
             c.put(PathMaker.key_file(i), '.')
             c.put(PathMaker.threshold_key_file(i), '.')
             c.put(PathMaker.parameters_file(), '.')
+            return i, host
+
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=len(hosts)) as executor:
+            futures = {executor.submit(upload_to_host, (i, host)): (i, host)
+                      for i, host in enumerate(hosts)}
+
+            for future in as_completed(futures):
+                completed_count += 1
+                i, host = future.result()
+                Print.info(f'  [{completed_count}/{len(hosts)}] Uploaded config to {host}')
+
+        Print.heading(f'Config files uploaded to all {len(hosts)} hosts')
 
         return committee
 
@@ -247,7 +263,7 @@ class Bench:
         # Wait for all transactions to be processed.
         duration = bench_parameters.duration
         for _ in progress_bar(range(100), prefix=f'Running benchmark ({duration} sec):'):
-            sleep(ceil(duration / 100))
+            sleep(duration / 100)
         self.kill(hosts=hosts, delete_logs=False)
 
     def _logs(self, hosts, faults, protocol, ddos):
@@ -255,14 +271,27 @@ class Bench:
         cmd = CommandMaker.clean_logs()
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
-        # Download log files.
-        progress = progress_bar(hosts, prefix='Downloading logs:')
-        for i, host in enumerate(progress):
+        # Download log files in parallel.
+        Print.info(f'Downloading logs from {len(hosts)} hosts in parallel...')
+
+        def download_from_host(host_index_pair):
+            i, host = host_index_pair
             c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
             c.get(PathMaker.node_log_file(i), local=PathMaker.node_log_file(i))
-            c.get(
-                PathMaker.client_log_file(i), local=PathMaker.client_log_file(i)
-            )
+            c.get(PathMaker.client_log_file(i), local=PathMaker.client_log_file(i))
+            return i, host
+
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=len(hosts)) as executor:
+            futures = {executor.submit(download_from_host, (i, host)): (i, host)
+                      for i, host in enumerate(hosts)}
+
+            for future in as_completed(futures):
+                completed_count += 1
+                i, host = future.result()
+                Print.info(f'  [{completed_count}/{len(hosts)}] Downloaded logs from {host}')
+
+        Print.heading(f'Logs downloaded from all {len(hosts)} hosts')
 
         # Parse logs and return the parser.
         Print.info('Parsing logs and computing performance...')

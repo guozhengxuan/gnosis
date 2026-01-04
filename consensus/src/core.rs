@@ -86,7 +86,7 @@ pub struct Core {
     timer: Timer,
 
     // Fallback.
-    prepare_tag: HashMap<SeqNumber, PrePare>, //标记 height高度的 val是否已经发送
+    prepare_tag: HashMap<SeqNumber, bool>, //标记 height高度的 val是否已经发送
     par_prepare_opts: HashMap<SeqNumber, HashMap<PublicKey, Signature>>,
     par_prepare_pess: HashMap<SeqNumber, HashMap<PublicKey, Signature>>,
     fallback_height: SeqNumber, // current fallback height
@@ -149,7 +149,7 @@ impl Core {
             commit_channel,
             core_channel,
             smvba_channel,
-            height: 1,
+            height: 0,
             opt_block_is_processed: HashMap::new(),
             last_voted_height: 0,
             last_committed_height: 0,
@@ -175,7 +175,7 @@ impl Core {
             prepare_tag: HashMap::new(),
             par_prepare_opts: HashMap::new(),
             par_prepare_pess: HashMap::new(),
-            fallback_height: 1,
+            fallback_height: 0,
             last_committed_fallback_height: 0,
             fallback_length,
             fallback_high_qc: HashMap::new(),
@@ -202,27 +202,6 @@ impl Core {
     fn update_prepare_state(&mut self, height: SeqNumber) {
         self.par_prepare_opts.insert(height, HashMap::new());
         self.par_prepare_pess.insert(height, HashMap::new());
-    }
-
-    fn clean_smvba_state(&mut self, height: &SeqNumber) {
-        self.smvba_d_flag.retain(|(h, _), _| h > height);
-        self.smvba_y_flag.retain(|(h, _), _| h > height);
-        self.smvba_n_flag.retain(|(h, _), _| h > height);
-        self.spb_current_phase.retain(|(h, _), _| h > height);
-        self.smvba_current_round.retain(|h, _| h > height);
-        self.spb_proposes.retain(|(h, _), _| h > height);
-        self.spb_finishs.retain(|(h, _), _| h > height);
-        self.spb_locks.retain(|(h, _), _| h > height);
-        self.smvba_dones.retain(|(h, _), _| h > height);
-        self.smvba_votes.retain(|(h, _), _| h > height);
-        self.smvba_no_prevotes.retain(|(h, _), _| h > height);
-        self.aggregator.cleanup_mvba_random(height);
-        self.aggregator.cleanup_spb_vote(height);
-        self.prepare_tag.retain(|h, _| h > height);
-        self.par_prepare_opts.retain(|h, _| h > height);
-        self.par_prepare_pess.retain(|h, _| h > height);
-        self.spb_abandon_flag.retain(|h, _| h > height);
-        self.fallback_high_qc.retain(|(h, _), _| h > height);
     }
 
     async fn store_block(&mut self, block: &Block) {
@@ -358,7 +337,7 @@ impl Core {
     }
 
     async fn local_timeout_round(&mut self) -> ConsensusResult<()> {
-        if !self.opt_path || self.height == 1 {
+        if !self.opt_path || self.height == 0 {
             return Ok(())
         }
 
@@ -429,7 +408,7 @@ impl Core {
 
             // Propose a new block with tc if we are the next leader.
             if self.name == self.leader_elector.get_leader(self.height) {
-                self.opt_propose(Some(tc)).await?;
+                self.opt_propose(self.height, Some(tc)).await?;
             }
         }
         Ok(())
@@ -456,10 +435,10 @@ impl Core {
 
     /***********************two-chain hotstuff*************************/
 
-    async fn opt_propose(&mut self, tc: Option<TC>) -> ConsensusResult<()> {
+    async fn opt_propose(&mut self, height: SeqNumber, tc: Option<TC>) -> ConsensusResult<()> {
         // Generate a new block and broadcast it.
         let block = self
-            .generate_proposal(self.height, 0, Some(self.high_qc.clone()), tc, OPT)
+            .generate_proposal(height, 0, Some(self.high_qc.clone()), tc, OPT)
             .await;
 
         let message = ConsensusMessage::HsPropose(block.clone());
@@ -473,8 +452,8 @@ impl Core {
         )
         .await?;
         
-        // Process and vote by the node itself.
-        self.process_opt_block(&block).await?;
+        // Handle and vote by the node itself.
+        self.handle_opt_proposal(&block).await?;
 
         // Wait for the minimum block delay.
         if !self.parameters.ddos {
@@ -548,7 +527,10 @@ impl Core {
         // Check whether b0 is `output` by opt path.
         let mut consecutive_rounds = b0.height + 1 == b1.height;
         consecutive_rounds &= b1.height + 1 == block.height;
-        if self.pes_path && consecutive_rounds && block.height > 2
+        if self.pes_path && 
+            consecutive_rounds && 
+            block.height > 2 && 
+            self.height == block.height
         {
 
             // Input 0 to next DBA.
@@ -559,6 +541,21 @@ impl Core {
                 HSProof::OPTProof((b1.qc.clone(), block.qc.clone())),
                 OPT,
             ).await?;
+        }
+
+        if !self.pes_path && 
+            consecutive_rounds && 
+            block.height > 2
+        {
+            if b0.height > self.last_committed_height {
+                self.commit(&b0).await?;
+
+                self.last_committed_height = b0.height;
+                debug!("Committed {:?}", b0);
+                if let Err(e) = self.commit_channel.send(b0.clone()).await {
+                    warn!("Failed to send block through the commit channel: {}", e);
+                }
+            }
         }
 
         // Ensure the block's round is as expected.
@@ -633,7 +630,7 @@ impl Core {
 
             // Make a new block if we are the next leader.
             if self.name == self.leader_elector.get_leader(self.height) {
-                self.opt_propose(None).await?;
+                self.opt_propose(self.height, None).await?;
             }
         }
         Ok(())
@@ -643,16 +640,16 @@ impl Core {
 
     /***********************fallback**********************/
 
-    async fn fallback_propose(&mut self) -> ConsensusResult<()> {
-        let block = self.generate_proposal(self.fallback_height, 1, None, None, PES).await;
-        self.broadcast_fallback_propose(block).await?;
-        Ok(())
+    async fn fallback_propose(&mut self, height: SeqNumber) -> ConsensusResult<()> {
+        if self.prepare_tag.contains_key(&height) {
+            return Ok(());
+        }
+
+        let block = self.generate_proposal(height, 1, None, None, PES).await;
+        self.broadcast_fallback_propose(block).await
     }
 
     async fn broadcast_fallback_propose(&mut self, block: Block) -> ConsensusResult<()> {
-        if *self.smvba_is_invoke.entry(block.height).or_insert(false) {
-            return Ok(());
-        }
         let message = ConsensusMessage::FBPropose(block.clone());
         Synchronizer::transmit(
             message,
@@ -676,11 +673,6 @@ impl Core {
 
     #[async_recursion]
     async fn handle_fallback_vote(&mut self, vote: &HVote) -> ConsensusResult<()> {
-        if vote.height < self.fallback_height {
-            debug!("fallback vote at fallback height: {} is outdated", vote.height);
-            return Ok(());
-        }
-
         if self.parameters.exp == 1 {
             vote.verify(&self.committee)?;
         }
@@ -706,11 +698,6 @@ impl Core {
     }
 
     async fn handle_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height < self.fallback_height {
-            debug!("fallback block at fallback height: {} is outdated", block.height);
-            return Ok(());
-        }
-
         if self.parameters.exp == 1 {
             block.verify(&self.committee)?
         }
@@ -730,11 +717,6 @@ impl Core {
     }
 
     async fn process_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height < self.fallback_height {
-            debug!("fallback block at fallback height: {} is outdated", block.height);
-            return Ok(());
-        }
-
         self.store_block(block).await;
 
         if let Some(vote) = self.make_fallback_vote(block).await {
@@ -780,7 +762,7 @@ impl Core {
         )
         .await;
 
-        self.prepare_tag.insert(height, prepare.clone());
+        self.prepare_tag.insert(height, true);
 
         let message = ConsensusMessage::ParPrePare(prepare.clone());
 
@@ -832,28 +814,9 @@ impl Core {
                         {
                             // Fast commit the opt block.
                             let b0: Block = bincode::deserialize(&bytes)?;
-                            let commit_height = b0.height;
                             self.commit(&b0).await?;
                             if let Err(e) = self.commit_channel.send(b0).await {
                                 warn!("Failed to send block through the commit channel: {}", e);
-                            }
-
-                            // Terminate the last sMVBA instance.
-                            if self.pes_path && prepare.height >= 2 {
-                                debug!(
-                                    "Fallback height: {} committed opt block height: {}",
-                                    prepare.height,
-                                    commit_height
-                                );
-                                debug!(
-                                    "Terminate sMVBA with fallback height: {}",
-                                    prepare.height - 1,
-                                );
-                                self.terminate_smvba(prepare.height - 1)?;
-                                self.last_committed_fallback_height = max(
-                                    self.last_committed_fallback_height,
-                                    prepare.height - 1
-                                );
                             }
                         }
                     }
@@ -936,11 +899,6 @@ impl Core {
                 .await
                 .expect("Failed to send the PES block");
         }
-        Ok(())
-    }
-
-    fn terminate_smvba(&mut self, height: SeqNumber) -> ConsensusResult<()> {
-        self.clean_smvba_state(&height);
         Ok(())
     }
 
@@ -1553,6 +1511,12 @@ impl Core {
 
         self.smvba_halt_falg.insert(halt.height, true);
 
+        if halt.value.val == OPT {
+            // Try to advance fallback height.
+            self.advance_fallback_height(halt.height).await?;
+            return Ok(())
+        }
+
         let block = halt.value.block;
         // Let's see if we have the block's data. If we don't, the mempool
         // will get it and then make us resume processing this block.
@@ -1570,28 +1534,8 @@ impl Core {
     }
 
     async fn process_par_out(&mut self, block: &Block) -> ConsensusResult<()> {
-        if block.height < self.fallback_height {
-            debug!(
-                "sMVBA output outdated block with fallback height: {} and round: {}",
-                block.height,
-                block.round
-            );
-            return Ok(());
-        }
-
-        // Start fallback proposals for next DBA.
-        if self.fallback_height == block.height {
-            self.fallback_height = block.height + 1;
-            debug!("Moved to fallback height: {} after last DBA ends", self.fallback_height);
-        }
-
-        if self.pes_path {
-            self.fallback_propose().await?;
-        }
-
-        if block.tag == OPT {
-            return Ok(());
-        }
+        // Try to advance fallback height.
+        self.advance_fallback_height(block.height).await?;
 
         self.store_block(block).await;
 
@@ -1606,6 +1550,16 @@ impl Core {
         Ok(())
     }
 
+    async fn advance_fallback_height(&mut self, height: SeqNumber) -> ConsensusResult<()> {
+        if self.fallback_height <= height {
+            self.fallback_height = height + 1;
+            debug!("Moved to fallback height: {} after last DBA ended", self.fallback_height);
+        }
+
+        // Start fallback proposals for next DBA.
+        self.fallback_propose(height + 1).await
+    }
+
     /******************SMVAB**************************************************************/
 
     pub async fn run(&mut self) {
@@ -1613,13 +1567,13 @@ impl Core {
             self.timer.reset();
 
             // Upon booting, generate the very first block (if we are the leader).
-            if self.name == self.leader_elector.get_leader(self.height) {
-                self.opt_propose(None).await.expect("Failed to send the first OPT block");
+            if self.name == self.leader_elector.get_leader(1) {
+                self.opt_propose(1, None).await.expect("Failed to send the first OPT block");
             }
         }
 
         if self.pes_path {
-            self.fallback_propose().await.expect("Failed to send the first PES block");
+            self.fallback_propose(1).await.expect("Failed to send the first PES block");
         }
 
         // This is the main loop: it processes incoming blocks and votes,
