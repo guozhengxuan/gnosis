@@ -226,7 +226,11 @@ class Bench:
         timeout = node_parameters.timeout_delay
         synctime = node_parameters.node_sync_time
         client_logs = [PathMaker.client_log_file(i) for i in range(len(hosts))]
-        for host, addr, log_file in zip(hosts, addresses, client_logs):
+
+        Print.info(f'Booting {len(hosts)} clients in parallel...')
+
+        def boot_client(client_info):
+            host, addr, log_file = client_info
             cmd = CommandMaker.run_client(
                 addr,
                 bench_parameters.tx_size,
@@ -236,16 +240,31 @@ class Bench:
                 nodes=addresses
             )
             self._background_run(host, cmd, log_file)
+            return host
+
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=len(hosts)) as executor:
+            futures = {executor.submit(boot_client, (host, addr, log_file)): host
+                      for host, addr, log_file in zip(hosts, addresses, client_logs)}
+
+            for future in as_completed(futures):
+                completed_count += 1
+                host = future.result()
+                Print.info(f'  [{completed_count}/{len(hosts)}] Booted client on {host}')
 
         Print.info('Clients boosted...')
-        sleep(10)
+        sleep(40)
 
         # Run the nodes.
         key_files = [PathMaker.key_file(i) for i in range(len(hosts))]
         dbs = [PathMaker.db_path(i) for i in range(len(hosts))]
         node_logs = [PathMaker.node_log_file(i) for i in range(len(hosts))]
         threshold_key_files = [PathMaker.threshold_key_file(i) for i in range(len(hosts))]
-        for host, key_file, threshold_key_file, db, log_file in zip(hosts, key_files, threshold_key_files, dbs, node_logs):
+
+        Print.info(f'Booting {len(hosts)} nodes in parallel...')
+
+        def boot_node(node_info):
+            host, key_file, threshold_key_file, db, log_file = node_info
             cmd = CommandMaker.run_node(
                 key_file,
                 threshold_key_file,
@@ -255,6 +274,17 @@ class Bench:
                 debug=debug
             )
             self._background_run(host, cmd, log_file)
+            return host
+
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=len(hosts)) as executor:
+            futures = {executor.submit(boot_node, (host, key_file, threshold_key_file, db, log_file)): host
+                      for host, key_file, threshold_key_file, db, log_file in zip(hosts, key_files, threshold_key_files, dbs, node_logs)}
+
+            for future in as_completed(futures):
+                completed_count += 1
+                host = future.result()
+                Print.info(f'  [{completed_count}/{len(hosts)}] Booted node on {host}')
 
         # Wait for the nodes to synchronize
         Print.info('Waiting for the nodes to synchronize...')
