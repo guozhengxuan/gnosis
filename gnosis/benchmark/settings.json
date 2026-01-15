@@ -1,0 +1,27 @@
+{
+    "key": {
+        "name": "accesskey-name",
+        "path": "/your/aws/creadential/path"
+    },
+    "ports": {
+        "smvba": 9000,
+        "consensus": 8000,
+        "mempool": 7000,
+        "front": 6000
+    },
+    "repo": {
+        "name": "gnosis",
+        "url": "the-anonymous-repo-link-of-gnosis",
+        "branch": "gnosis"
+    },
+    "instances": {
+        "type": "m5d.xlarge",
+        "regions": [
+            "us-east-2",
+            "us-west-1",
+            "eu-north-1",
+            "ap-northeast-1",
+            "ap-southeast-2"
+        ]
+    }
+}

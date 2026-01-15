@@ -1,0 +1,10 @@
+benchmark/.*
+benchmark/client
+benchmark/node
+benchmark/logs/*
+benchmark/results/*
+benchmark/aws/__pycache__/*
+benchmark/benchmark/__pycache__/*
+target/*
+store/.*.
+.vscode/*

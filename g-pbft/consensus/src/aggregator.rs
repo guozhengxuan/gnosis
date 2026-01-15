@@ -1,0 +1,283 @@
+use crate::config::{Committee, Stake};
+use crate::core::SeqNumber;
+use crate::error::{ConsensusError, ConsensusResult};
+use crate::messages::{HVote, QC, RandomCoin, RandomnessShare, SPBProof, SPBVote, TC, Timeout};
+use crypto::{PublicKey, Signature};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use threshold_crypto::PublicKeySet;
+// use std::convert::TryInto;
+
+#[cfg(test)]
+#[path = "tests/aggregator_tests.rs"]
+pub mod aggregator_tests;
+
+pub struct Aggregator {
+    committee: Committee,
+    pbft_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
+    timeouts_aggregators: HashMap<SeqNumber, Box<TCMaker>>,
+    fallback_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
+    spb_votes_aggregators: HashMap<(SeqNumber, SeqNumber, u8), Box<ProofMaker>>,
+    pre_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<ProofMaker>>,
+    smvba_randomcoin_aggregators: HashMap<(SeqNumber, SeqNumber), Box<SMVBARandomCoinMaker>>,
+}
+
+impl Aggregator {
+    pub fn new(committee: Committee) -> Self {
+        Self {
+            committee,
+            pbft_votes_aggregators: HashMap::new(),
+            timeouts_aggregators: HashMap::new(),
+            fallback_votes_aggregators: HashMap::new(),
+            spb_votes_aggregators: HashMap::new(),
+            smvba_randomcoin_aggregators: HashMap::new(),
+            pre_votes_aggregators: HashMap::new(),
+        }
+    }
+
+    pub fn add_pbft_vote(&mut self, vote: HVote) -> ConsensusResult<Option<QC>> {
+        // Add the new vote to our aggregator and see if we have a QC.
+        self.pbft_votes_aggregators
+            .entry((vote.height, vote.round))
+            .or_insert_with(|| Box::new(QCMaker::new()))
+            .append(vote, &self.committee)
+    }
+
+    pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<Option<TC>> {
+        // Add the new timeout to our aggregator and see if we have a TC.
+        self.timeouts_aggregators
+            .entry(timeout.height)
+            .or_insert_with(|| Box::new(TCMaker::new()))
+            .append(timeout, &self.committee)
+    }
+
+    pub fn add_fallback_vote(&mut self, vote: HVote) -> ConsensusResult<Option<QC>> {
+        self.fallback_votes_aggregators
+            .entry((vote.height, vote.round))
+            .or_insert_with(|| Box::new(QCMaker::new()))
+            .append(vote, &self.committee)
+    }
+
+    pub fn add_spb_vote(&mut self, vote: SPBVote) -> ConsensusResult<Option<SPBProof>> {
+        // Add the new vote to our aggregator and see if we have a QC.
+        self.spb_votes_aggregators
+            .entry((vote.height, vote.round, vote.phase))
+            .or_insert_with(|| Box::new(ProofMaker::new()))
+            .append(vote, &self.committee)
+    }
+
+    pub fn add_pre_vote(&mut self, vote: SPBVote) -> ConsensusResult<Option<SPBProof>> {
+        // Add the new vote to our aggregator and see if we have a QC.
+        self.pre_votes_aggregators
+            .entry((vote.height, vote.round))
+            .or_insert_with(|| Box::new(ProofMaker::new()))
+            .append(vote, &self.committee)
+    }
+
+    pub fn add_smvba_random(
+        &mut self,
+        share: RandomnessShare,
+        pk_set: &PublicKeySet,
+    ) -> ConsensusResult<Option<RandomCoin>> {
+        self.smvba_randomcoin_aggregators
+            .entry((share.height, share.round))
+            .or_insert_with(|| Box::new(SMVBARandomCoinMaker::new()))
+            .append(share, &self.committee, pk_set)
+    }
+
+    // used in PBFT
+    pub fn cleanup_pbft(&mut self, height: &SeqNumber) {
+        self.pbft_votes_aggregators.retain(|(k, _), _| k > height);
+        self.timeouts_aggregators.retain(|k, _| k >= height);
+    }
+}
+
+struct QCMaker {
+    weight: Stake,
+    votes: Vec<(PublicKey, Signature)>,
+    used: HashSet<PublicKey>,
+}
+
+impl QCMaker {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            votes: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    /// Try to append a signature to a (partial) quorum.
+    pub fn append(&mut self, vote: HVote, committee: &Committee) -> ConsensusResult<Option<QC>> {
+        let author = vote.author;
+        // Ensure it is the first time this authority votes.
+        ensure!(
+            self.used.insert(author),
+            ConsensusError::AuthorityReuseinQC(author)
+        );
+        self.votes.push((author, vote.signature));
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0; // Ensures QC is only made once.
+            return Ok(Some(QC {
+                hash: vote.hash.clone(),
+                height: vote.height,
+                round: vote.round,
+                tag: vote.tag,
+                proposer: vote.proposer,
+                acceptor: vote.proposer,
+                votes: self.votes.clone(),
+            }));
+        }
+        Ok(None)
+    }
+}
+
+struct ProofMaker {
+    weight: Stake,
+    votes: Vec<SPBVote>,
+    used: HashSet<PublicKey>,
+}
+
+impl ProofMaker {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            votes: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    /// Try to append a signature to a (partial) quorum.
+    pub fn append(
+        &mut self,
+        vote: SPBVote,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<SPBProof>> {
+        let author = vote.author;
+        let phase = vote.phase;
+        let round = vote.round;
+        let height = vote.height;
+        // Ensure it is the first time this authority votes.
+        ensure!(
+            self.used.insert(author),
+            ConsensusError::AuthorityReuseinProof(author, self.used.clone())
+        );
+        self.votes.push(vote);
+        self.weight += committee.stake(&author);
+
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0; // Ensures QC is only made once.
+            return Ok(Some(SPBProof {
+                height,
+                phase: phase + 1, //为下一个阶段产生proof
+                round,
+                shares: self.votes.clone(),
+            }));
+        }
+        Ok(None)
+    }
+}
+
+struct TCMaker {
+    weight: Stake,
+    votes: Vec<(PublicKey, Signature, SeqNumber)>,
+    used: HashSet<PublicKey>,
+}
+
+impl TCMaker {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            votes: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    /// Try to append a signature to a (partial) quorum.
+    pub fn append(
+        &mut self,
+        timeout: Timeout,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<TC>> {
+        let author = timeout.author;
+
+        // Ensure it is the first time this authority votes.
+        ensure!(
+            self.used.insert(author),
+            ConsensusError::AuthorityReuseinTC(author)
+        );
+
+        // Add the timeout to the accumulator.
+        self.votes
+            .push((author, timeout.signature, timeout.high_qc.height));
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0; // Ensures TC is only created once.
+            return Ok(Some(TC {
+                height: timeout.height,
+                votes: self.votes.clone(),
+            }));
+        }
+        Ok(None)
+    }
+}
+
+struct SMVBARandomCoinMaker {
+    weight: Stake,
+    shares: Vec<RandomnessShare>,
+    used: HashSet<PublicKey>,
+}
+
+impl SMVBARandomCoinMaker {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            shares: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    /// Try to append a signature to a (partial) quorum.
+    pub fn append(
+        &mut self,
+        share: RandomnessShare,
+        committee: &Committee,
+        pk_set: &PublicKeySet,
+    ) -> ConsensusResult<Option<RandomCoin>> {
+        let author = share.author;
+        // Ensure it is the first time this authority votes.
+        ensure!(
+            self.used.insert(author),
+            ConsensusError::AuthorityReuseinCoin(author)
+        );
+        self.shares.push(share.clone());
+        self.weight += committee.stake(&author);
+        if self.weight == committee.random_coin_threshold() {
+            // self.weight = 0; // Ensures QC is only made once.
+            let mut sigs = BTreeMap::new();
+            // Check the random shares.
+            for share in self.shares.clone() {
+                sigs.insert(
+                    committee.id(share.author.clone()),
+                    share.signature_share.clone(),
+                );
+            }
+            if let Ok(sig) = pk_set.combine_signatures(sigs.iter()) {
+                let id = usize::from_be_bytes((&sig.to_bytes()[0..8]).try_into().unwrap())
+                    % committee.size();
+                let mut keys: Vec<_> = committee.authorities.keys().cloned().collect();
+                keys.sort();
+                let leader = keys[id];
+
+                let random_coin = RandomCoin {
+                    height: share.height,
+                    round: share.round,
+                    leader,
+                    shares: self.shares.to_vec(),
+                };
+                return Ok(Some(random_coin));
+            }
+        }
+        Ok(None)
+    }
+}
